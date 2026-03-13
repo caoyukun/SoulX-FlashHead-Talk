@@ -1,0 +1,347 @@
+"""
+FlashHead Python 模型服务
+提供 REST API 供 Java 后端调用
+"""
+import os
+import sys
+import tempfile
+import threading
+import queue
+import time
+from datetime import datetime
+from collections import deque
+
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
+from loguru import logger
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+try:
+    from flash_head.inference import (
+        get_pipeline,
+        get_base_data,
+        get_infer_params,
+        get_audio_embedding,
+        run_pipeline,
+    )
+    FLASHHEAD_AVAILABLE = True
+except ImportError:
+    logger.warning("FlashHead 模块未找到，部分功能将不可用")
+    FLASHHEAD_AVAILABLE = False
+
+app = Flask(__name__)
+CORS(app)
+
+CHUNKS_PER_SEGMENT = 3
+
+pipeline = None
+loaded_ckpt_dir = None
+loaded_wav2vec_dir = None
+loaded_model_type = None
+
+
+def _write_frames_to_mp4(frames_list, video_path, fps):
+    """将视频帧列表写入MP4文件"""
+    import numpy as np
+    import imageio
+    import torch
+    
+    os.makedirs(os.path.dirname(video_path) or ".", exist_ok=True)
+    with imageio.get_writer(
+        video_path,
+        format="mp4",
+        mode="I",
+        fps=fps,
+        codec="h264",
+        ffmpeg_params=["-bf", "0"],
+    ) as writer:
+        for frames in frames_list:
+            if isinstance(frames, torch.Tensor):
+                frames_np = frames.numpy().astype(np.uint8)
+            else:
+                frames_np = frames.astype(np.uint8)
+            for i in range(frames_np.shape[0]):
+                writer.append_data(frames_np[i, :, :, :])
+    return video_path
+
+
+def save_video_with_audio(frames_list, video_path, audio_path, fps):
+    """将视频帧和音频合并为完整的MP4文件"""
+    import subprocess
+    
+    temp_path = video_path.replace(".mp4", "_temp.mp4")
+    _write_frames_to_mp4(frames_list, temp_path, fps)
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", temp_path,
+            "-i", audio_path,
+            "-c:v", "copy",
+            "-c:a", "aac",
+            video_path,
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    return video_path
+
+
+def _save_chunk_audio_to_wav(audio_array, wav_path, sample_rate=16000):
+    """将音频数组保存为WAV文件"""
+    import numpy as np
+    import wave
+    
+    os.makedirs(os.path.dirname(wav_path) or ".", exist_ok=True)
+    samples = (np.clip(audio_array, -1.0, 1.0) * 32767).astype(np.int16)
+    with wave.open(wav_path, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(samples.tobytes())
+    return wav_path
+
+
+def create_silent_audio(duration=2.0, sample_rate=16000):
+    """创建静音音频"""
+    import numpy as np
+    return np.zeros(int(duration * sample_rate), dtype=np.float32)
+
+
+def text_to_speech_free(text, output_path):
+    """文本转语音"""
+    import subprocess
+    
+    try:
+        import edge_tts
+        import asyncio
+        
+        async def generate_audio():
+            communicate = edge_tts.Communicate(text, "zh-CN-XiaoxiaoNeural")
+            await communicate.save(output_path)
+        
+        asyncio.run(generate_audio())
+        
+        wav_path = output_path.replace(".mp3", ".wav")
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", output_path,
+            "-ar", "16000",
+            "-ac", "1",
+            wav_path
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        
+        os.remove(output_path)
+        return wav_path
+    except ImportError:
+        logger.warning("edge-tts 未安装，使用 gTTS")
+        from gtts import gTTS
+        
+        tts = gTTS(text=text, lang='zh-cn')
+        tts.save(output_path)
+        
+        wav_path = output_path.replace(".mp3", ".wav")
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", output_path,
+            "-ar", "16000",
+            "-ac", "1",
+            wav_path
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        
+        os.remove(output_path)
+        return wav_path
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    """健康检查"""
+    return jsonify({
+        "status": "ok",
+        "flashhead_available": FLASHHEAD_AVAILABLE,
+        "timestamp": datetime.now().isoformat()
+    })
+
+
+@app.route('/tts', methods=['POST'])
+def tts():
+    """文本转语音"""
+    try:
+        data = request.json
+        text = data.get('text', '')
+        
+        if not text:
+            return jsonify({"error": "文本不能为空"}), 400
+        
+        temp_dir = tempfile.mkdtemp()
+        output_path = os.path.join(temp_dir, "tts_audio.mp3")
+        
+        wav_path = text_to_speech_free(text, output_path)
+        
+        return send_file(wav_path, mimetype='audio/wav')
+    except Exception as e:
+        logger.error(f"TTS 错误: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/initialize', methods=['POST'])
+def initialize():
+    """初始化模型"""
+    global pipeline, loaded_ckpt_dir, loaded_wav2vec_dir, loaded_model_type
+    
+    if not FLASHHEAD_AVAILABLE:
+        return jsonify({"error": "FlashHead 模块不可用"}), 500
+    
+    try:
+        data = request.json
+        ckpt_dir = data.get('ckpt_dir', 'models/SoulX-FlashHead-1_3B')
+        wav2vec_dir = data.get('wav2vec_dir', 'models/wav2vec2-base-960h')
+        model_type = data.get('model_type', 'lite')
+        cond_image = data.get('cond_image', 'examples/girl.png')
+        seed = data.get('seed', 9999)
+        use_face_crop = data.get('use_face_crop', False)
+        
+        if (
+            pipeline is None
+            or loaded_ckpt_dir != ckpt_dir
+            or loaded_wav2vec_dir != wav2vec_dir
+            or loaded_model_type != model_type
+        ):
+            logger.info(f"加载模型: ckpt_dir={ckpt_dir}, wav2vec_dir={wav2vec_dir}")
+            pipeline = get_pipeline(
+                world_size=1,
+                ckpt_dir=ckpt_dir,
+                model_type=model_type,
+                wav2vec_dir=wav2vec_dir,
+            )
+            loaded_ckpt_dir = ckpt_dir
+            loaded_wav2vec_dir = wav2vec_dir
+            loaded_model_type = model_type
+        
+        base_seed = int(seed) if seed >= 0 else 9999
+        get_base_data(
+            pipeline,
+            cond_image_path_or_dir=cond_image,
+            base_seed=base_seed,
+            use_face_crop=use_face_crop,
+        )
+        
+        return jsonify({"status": "initialized"})
+    except Exception as e:
+        logger.error(f"初始化错误: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/generate-video', methods=['POST'])
+def generate_video():
+    """生成视频"""
+    if not FLASHHEAD_AVAILABLE:
+        return jsonify({"error": "FlashHead 模块不可用"}), 500
+    
+    try:
+        import numpy as np
+        import torch
+        import librosa
+        
+        data = request.json
+        audio_path = data.get('audio_path')
+        cond_image = data.get('cond_image', 'examples/girl.png')
+        ckpt_dir = data.get('ckpt_dir', 'models/SoulX-FlashHead-1_3B')
+        wav2vec_dir = data.get('wav2vec_dir', 'models/wav2vec2-base-960h')
+        model_type = data.get('model_type', 'lite')
+        seed = data.get('seed', 9999)
+        use_face_crop = data.get('use_face_crop', False)
+        
+        if not audio_path or not os.path.exists(audio_path):
+            return jsonify({"error": "音频文件不存在"}), 400
+        
+        global pipeline, loaded_ckpt_dir, loaded_wav2vec_dir, loaded_model_type
+        
+        if (
+            pipeline is None
+            or loaded_ckpt_dir != ckpt_dir
+            or loaded_wav2vec_dir != wav2vec_dir
+            or loaded_model_type != model_type
+        ):
+            logger.info(f"加载模型: ckpt_dir={ckpt_dir}, wav2vec_dir={wav2vec_dir}")
+            pipeline = get_pipeline(
+                world_size=1,
+                ckpt_dir=ckpt_dir,
+                model_type=model_type,
+                wav2vec_dir=wav2vec_dir,
+            )
+            loaded_ckpt_dir = ckpt_dir
+            loaded_wav2vec_dir = wav2vec_dir
+            loaded_model_type = model_type
+        
+        base_seed = int(seed) if seed >= 0 else 9999
+        get_base_data(
+            pipeline,
+            cond_image_path_or_dir=cond_image,
+            base_seed=base_seed,
+            use_face_crop=use_face_crop,
+        )
+        
+        infer_params = get_infer_params()
+        sample_rate = infer_params["sample_rate"]
+        tgt_fps = infer_params["tgt_fps"]
+        cached_audio_duration = infer_params["cached_audio_duration"]
+        frame_num = infer_params["frame_num"]
+        motion_frames_num = infer_params["motion_frames_num"]
+        slice_len = frame_num - motion_frames_num
+        
+        human_speech_array_all, _ = librosa.load(audio_path, sr=sample_rate, mono=True)
+        human_speech_array_slice_len = slice_len * sample_rate // tgt_fps
+        
+        remainder = len(human_speech_array_all) % human_speech_array_slice_len
+        if remainder > 0:
+            pad_length = human_speech_array_slice_len - remainder
+            human_speech_array_all = np.concatenate(
+                [human_speech_array_all, np.zeros(pad_length, dtype=human_speech_array_all.dtype)]
+            )
+        human_speech_array_slices = human_speech_array_all.reshape(-1, human_speech_array_slice_len)
+        
+        if len(human_speech_array_slices) == 0:
+            return jsonify({"error": "音频太短"}), 400
+        
+        stream_dir = os.path.join("chat_results", "stream_preview")
+        os.makedirs(stream_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+        accumulated = []
+        
+        cached_audio_length_sum = sample_rate * cached_audio_duration
+        audio_end_idx = cached_audio_duration * tgt_fps
+        audio_start_idx = audio_end_idx - frame_num
+        
+        audio_dq = deque([0.0] * cached_audio_length_sum, maxlen=cached_audio_length_sum)
+        for human_speech_array in human_speech_array_slices:
+            audio_dq.extend(human_speech_array.tolist())
+            audio_array = np.array(audio_dq)
+            audio_embedding = get_audio_embedding(pipeline, audio_array, audio_start_idx, audio_end_idx)
+            torch.cuda.synchronize()
+            video = run_pipeline(pipeline, audio_embedding)
+            video = video[motion_frames_num:]
+            torch.cuda.synchronize()
+            accumulated.append(torch.from_numpy(video.cpu().numpy()))
+        
+        output_dir = "chat_results"
+        os.makedirs(output_dir, exist_ok=True)
+        final_filename = f"res_{timestamp}.mp4"
+        final_path = os.path.join(output_dir, final_filename)
+        save_video_with_audio(accumulated, final_path, audio_path, fps=tgt_fps)
+        
+        return jsonify({
+            "status": "success",
+            "video_path": os.path.abspath(final_path)
+        })
+    except Exception as e:
+        logger.error(f"生成视频错误: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == '__main__':
+    logger.info("启动 FlashHead Python 服务...")
+    app.run(host='0.0.0.0', port=5000, debug=True)

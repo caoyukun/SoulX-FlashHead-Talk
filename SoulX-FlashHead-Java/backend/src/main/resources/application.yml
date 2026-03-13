@@ -1,0 +1,18 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: flashhead-backend
+
+flashhead:
+  python-service:
+    url: http://localhost:5000
+  volcengine:
+    api-url: https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions
+  video:
+    storage-path: ./chat_results
+
+logging:
+  level:
+    com.soulx.flashhead: DEBUG
