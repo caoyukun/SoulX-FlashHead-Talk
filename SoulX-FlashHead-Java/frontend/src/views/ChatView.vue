@@ -56,6 +56,10 @@
               </el-form-item>
             </el-collapse-item>
           </el-collapse>
+          
+          <el-button type="primary" @click="initializeModel" :loading="isInitializing">
+            初始化模型
+          </el-button>
         </el-form>
       </el-card>
     </el-col>
@@ -65,6 +69,8 @@
         <template #header>
           <div class="card-header">
             <span>📺 数字人</span>
+            <el-tag v-if="isConnected" type="success" size="small">已连接</el-tag>
+            <el-tag v-else type="danger" size="small">未连接</el-tag>
           </div>
         </template>
         <div class="video-wrapper">
@@ -73,7 +79,7 @@
             class="digital-human-video"
             controls
             autoplay
-            loop
+            :key="currentVideoUrl"
           >
             <source :src="currentVideoUrl" type="video/mp4" />
             您的浏览器不支持视频播放。
@@ -90,7 +96,7 @@
         
         <div class="chat-messages" ref="chatMessages">
           <div
-            v-for="(msg, index) in chatHistory"
+            v-for="(msg, index) in chatStore.chatHistory"
             :key="index"
             class="message-item"
           >
@@ -108,6 +114,7 @@
             v-model="inputMessage"
             placeholder="请输入您想说的话..."
             @keyup.enter="sendMessage"
+            :disabled="isSending"
           />
           <el-button type="primary" @click="sendMessage" :loading="isSending">
             发送
@@ -119,15 +126,22 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, nextTick } from 'vue'
+import { ref, reactive, onMounted, nextTick, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useChatStore } from '../store/chat'
+import { chatApi, videoApi } from '../api'
 
 const videoPlayer = ref(null)
 const chatMessages = ref(null)
-const currentVideoUrl = ref('')
 const inputMessage = ref('')
 const isSending = ref(false)
-const chatHistory = ref([])
+const isInitializing = ref(false)
+const isConnected = ref(false)
+const currentVideoUrl = ref('')
+
+let ws = null
+
+const chatStore = useChatStore()
 
 const settings = reactive({
   apiKey: '',
@@ -147,6 +161,74 @@ const scrollToBottom = () => {
   })
 }
 
+const connectWebSocket = () => {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const wsUrl = `${protocol}//${window.location.host}/ws`
+  
+  ws = new WebSocket(wsUrl)
+  
+  ws.onopen = () => {
+    console.log('WebSocket 连接成功')
+    isConnected.value = true
+    chatStore.setConnected(true)
+    ElMessage.success('WebSocket 连接成功')
+  }
+  
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data)
+      handleWebSocketMessage(data)
+    } catch (e) {
+      console.error('解析 WebSocket 消息失败:', e)
+    }
+  }
+  
+  ws.onerror = (error) => {
+    console.error('WebSocket 错误:', error)
+    isConnected.value = false
+    chatStore.setConnected(false)
+  }
+  
+  ws.onclose = () => {
+    console.log('WebSocket 连接关闭')
+    isConnected.value = false
+    chatStore.setConnected(false)
+  }
+}
+
+const handleWebSocketMessage = (data) => {
+  if (data.type === 'chat') {
+    chatStore.addMessage(data.data.user, data.data.assistant)
+    scrollToBottom()
+  } else if (data.type === 'error') {
+    ElMessage.error(data.message)
+  } else if (data.type === 'video_segment' || data.type === 'video_final' || data.type === 'idle_video') {
+    if (data.path) {
+      const videoUrl = videoApi.getVideoUrl(data.path)
+      currentVideoUrl.value = videoUrl
+      chatStore.setCurrentVideoUrl(videoUrl)
+      
+      if (videoPlayer.value) {
+        videoPlayer.value.load()
+        videoPlayer.value.play().catch(e => console.log('自动播放失败:', e))
+      }
+    }
+  }
+}
+
+const initializeModel = async () => {
+  isInitializing.value = true
+  try {
+    await chatApi.initialize(settings)
+    ElMessage.success('模型初始化成功')
+  } catch (error) {
+    console.error('初始化失败:', error)
+    ElMessage.error('初始化失败: ' + (error.response?.data?.message || error.message))
+  } finally {
+    isInitializing.value = false
+  }
+}
+
 const sendMessage = async () => {
   if (!inputMessage.value.trim()) {
     ElMessage.warning('请输入消息')
@@ -158,15 +240,34 @@ const sendMessage = async () => {
     return
   }
   
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    ElMessage.warning('WebSocket 未连接，正在尝试连接...')
+    connectWebSocket()
+    return
+  }
+  
   isSending.value = true
   const message = inputMessage.value
   inputMessage.value = ''
   
   try {
-    ElMessage.info('正在处理...')
+    const response = await chatApi.sendMessage({
+      message,
+      apiKey: settings.apiKey,
+      condImage: settings.condImage,
+      ckptDir: settings.ckptDir,
+      wav2vecDir: settings.wav2vecDir,
+      modelType: settings.modelType,
+      seed: settings.seed,
+      useFaceCrop: settings.useFaceCrop
+    })
+    
+    const sessionId = response.data.sessionId
+    chatStore.setSessionId(sessionId)
+    ElMessage.info('消息已发送，正在处理...')
   } catch (error) {
     console.error('发送消息失败:', error)
-    ElMessage.error('发送消息失败: ' + (error.message || '未知错误'))
+    ElMessage.error('发送消息失败: ' + (error.response?.data?.message || error.message))
   } finally {
     isSending.value = false
   }
@@ -174,6 +275,13 @@ const sendMessage = async () => {
 
 onMounted(() => {
   console.log('ChatView mounted')
+  connectWebSocket()
+})
+
+onUnmounted(() => {
+  if (ws) {
+    ws.close()
+  }
 })
 </script>
 
@@ -183,6 +291,9 @@ onMounted(() => {
 }
 
 .card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   font-weight: bold;
   font-size: 16px;
 }

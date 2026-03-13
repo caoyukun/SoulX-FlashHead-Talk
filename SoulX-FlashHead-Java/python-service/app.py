@@ -15,7 +15,13 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from loguru import logger
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+current_file = os.path.realpath(__file__)
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
+logger.info(f"当前文件: {current_file}")
+logger.info(f"项目根目录: {project_root}")
+logger.info(f"项目根目录内容: {os.listdir(project_root) if os.path.exists(project_root) else '目录不存在'}")
+sys.path.insert(0, project_root)
+logger.info(f"Python路径: {sys.path}")
 
 try:
     from flash_head.inference import (
@@ -339,6 +345,291 @@ def generate_video():
         })
     except Exception as e:
         logger.error(f"生成视频错误: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/generate-video-streaming', methods=['POST'])
+def generate_video_streaming():
+    """流式生成视频"""
+    if not FLASHHEAD_AVAILABLE:
+        return jsonify({"error": "FlashHead 模块不可用"}), 500
+    
+    try:
+        import numpy as np
+        import torch
+        import librosa
+        
+        data = request.json
+        audio_path = data.get('audio_path')
+        cond_image = data.get('cond_image', 'examples/girl.png')
+        ckpt_dir = data.get('ckpt_dir', 'models/SoulX-FlashHead-1_3B')
+        wav2vec_dir = data.get('wav2vec_dir', 'models/wav2vec2-base-960h')
+        model_type = data.get('model_type', 'lite')
+        seed = data.get('seed', 9999)
+        use_face_crop = data.get('use_face_crop', False)
+        stream_id = data.get('stream_id', datetime.now().strftime("%Y%m%d-%H%M%S"))
+        
+        if not audio_path or not os.path.exists(audio_path):
+            return jsonify({"error": "音频文件不存在"}), 400
+        
+        global pipeline, loaded_ckpt_dir, loaded_wav2vec_dir, loaded_model_type
+        
+        if (
+            pipeline is None
+            or loaded_ckpt_dir != ckpt_dir
+            or loaded_wav2vec_dir != wav2vec_dir
+            or loaded_model_type != model_type
+        ):
+            logger.info(f"加载模型: ckpt_dir={ckpt_dir}, wav2vec_dir={wav2vec_dir}")
+            pipeline = get_pipeline(
+                world_size=1,
+                ckpt_dir=ckpt_dir,
+                model_type=model_type,
+                wav2vec_dir=wav2vec_dir,
+            )
+            loaded_ckpt_dir = ckpt_dir
+            loaded_wav2vec_dir = wav2vec_dir
+            loaded_model_type = model_type
+        
+        base_seed = int(seed) if seed >= 0 else 9999
+        get_base_data(
+            pipeline,
+            cond_image_path_or_dir=cond_image,
+            base_seed=base_seed,
+            use_face_crop=use_face_crop,
+        )
+        
+        infer_params = get_infer_params()
+        sample_rate = infer_params["sample_rate"]
+        tgt_fps = infer_params["tgt_fps"]
+        cached_audio_duration = infer_params["cached_audio_duration"]
+        frame_num = infer_params["frame_num"]
+        motion_frames_num = infer_params["motion_frames_num"]
+        slice_len = frame_num - motion_frames_num
+        
+        human_speech_array_all, _ = librosa.load(audio_path, sr=sample_rate, mono=True)
+        human_speech_array_slice_len = slice_len * sample_rate // tgt_fps
+        
+        remainder = len(human_speech_array_all) % human_speech_array_slice_len
+        if remainder > 0:
+            pad_length = human_speech_array_slice_len - remainder
+            human_speech_array_all = np.concatenate(
+                [human_speech_array_all, np.zeros(pad_length, dtype=human_speech_array_all.dtype)]
+            )
+        human_speech_array_slices = human_speech_array_all.reshape(-1, human_speech_array_slice_len)
+        total_chunks = len(human_speech_array_slices)
+        
+        if total_chunks == 0:
+            return jsonify({"error": "音频太短"}), 400
+        
+        stream_dir = os.path.join("chat_results", "stream_preview")
+        os.makedirs(stream_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+        accumulated = []
+        
+        segment_audio_paths = {}
+        num_segments = (total_chunks + CHUNKS_PER_SEGMENT - 1) // CHUNKS_PER_SEGMENT
+        for segment_id in range(num_segments):
+            start = segment_id * CHUNKS_PER_SEGMENT
+            end = min(start + CHUNKS_PER_SEGMENT, total_chunks)
+            audio_concat = np.concatenate(
+                [human_speech_array_slices[i] for i in range(start, end)]
+            )
+            segment_audio_name = f"audio_{stream_id}_seg_{segment_id:04d}.wav"
+            segment_audio_path = os.path.join(stream_dir, segment_audio_name)
+            _save_chunk_audio_to_wav(
+                audio_concat,
+                segment_audio_path,
+                sample_rate=sample_rate,
+            )
+            segment_audio_paths[segment_id] = segment_audio_path
+        
+        res_queue = queue.Queue()
+        
+        def inference_worker():
+            audio_dq = deque([0.0] * (sample_rate * cached_audio_duration), 
+                            maxlen=sample_rate * cached_audio_duration)
+            cached_audio_length_sum = sample_rate * cached_audio_duration
+            audio_end_idx = cached_audio_duration * tgt_fps
+            audio_start_idx = audio_end_idx - frame_num
+            
+            for chunk_idx, human_speech_array in enumerate(human_speech_array_slices):
+                audio_dq.extend(human_speech_array.tolist())
+                audio_array = np.array(audio_dq)
+                audio_embedding = get_audio_embedding(pipeline, audio_array, audio_start_idx, audio_end_idx)
+                torch.cuda.synchronize()
+                start_time = time.time()
+                video = run_pipeline(pipeline, audio_embedding)
+                video = video[motion_frames_num:]
+                torch.cuda.synchronize()
+                logger.info(f"Infer chunk-{chunk_idx} done, cost time: {time.time() - start_time:.2f}s")
+                chunk_frames_np = video.cpu().numpy()
+                res_queue.put((chunk_idx, chunk_frames_np))
+            res_queue.put(None)
+        
+        worker_thread = threading.Thread(target=inference_worker)
+        worker_thread.start()
+        
+        segment_paths = []
+        frame_buffer = []
+        while True:
+            item = res_queue.get()
+            if item is None:
+                break
+            chunk_idx, chunk_frames_np = item
+            chunk_frames = torch.from_numpy(chunk_frames_np)
+            accumulated.append(chunk_frames)
+            frame_buffer.append(chunk_frames)
+            if len(frame_buffer) == CHUNKS_PER_SEGMENT:
+                segment_id = (chunk_idx + 1 - CHUNKS_PER_SEGMENT) // CHUNKS_PER_SEGMENT
+                segment_audio_path = segment_audio_paths[segment_id]
+                segment_path = os.path.join(
+                    stream_dir, f"preview_{stream_id}_seg_{segment_id:04d}.mp4"
+                )
+                save_video_with_audio(
+                    frame_buffer,
+                    segment_path,
+                    segment_audio_path,
+                    fps=tgt_fps,
+                )
+                segment_paths.append(os.path.abspath(segment_path))
+                frame_buffer = []
+        
+        if frame_buffer:
+            segment_id = num_segments - 1
+            segment_audio_path = segment_audio_paths[segment_id]
+            segment_path = os.path.join(
+                stream_dir, f"preview_{stream_id}_seg_{segment_id:04d}.mp4"
+            )
+            save_video_with_audio(
+                frame_buffer,
+                segment_path,
+                segment_audio_path,
+                fps=tgt_fps,
+            )
+            segment_paths.append(os.path.abspath(segment_path))
+        
+        worker_thread.join()
+        
+        output_dir = "chat_results"
+        os.makedirs(output_dir, exist_ok=True)
+        final_filename = f"res_{stream_id}.mp4"
+        final_path = os.path.join(output_dir, final_filename)
+        save_video_with_audio(accumulated, final_path, audio_path, fps=tgt_fps)
+        
+        return jsonify({
+            "status": "success",
+            "stream_id": stream_id,
+            "segments": segment_paths,
+            "final_video": os.path.abspath(final_path)
+        })
+    except Exception as e:
+        logger.error(f"流式生成视频错误: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/generate-idle-video', methods=['POST'])
+def generate_idle_video():
+    """生成空闲视频"""
+    if not FLASHHEAD_AVAILABLE:
+        return jsonify({"error": "FlashHead 模块不可用"}), 500
+    
+    try:
+        import numpy as np
+        import torch
+        
+        data = request.json
+        duration = data.get('duration', 5.0)
+        cond_image = data.get('cond_image', 'examples/girl.png')
+        ckpt_dir = data.get('ckpt_dir', 'models/SoulX-FlashHead-1_3B')
+        wav2vec_dir = data.get('wav2vec_dir', 'models/wav2vec2-base-960h')
+        model_type = data.get('model_type', 'lite')
+        seed = data.get('seed', 9999)
+        use_face_crop = data.get('use_face_crop', False)
+        
+        global pipeline, loaded_ckpt_dir, loaded_wav2vec_dir, loaded_model_type
+        
+        if (
+            pipeline is None
+            or loaded_ckpt_dir != ckpt_dir
+            or loaded_wav2vec_dir != wav2vec_dir
+            or loaded_model_type != model_type
+        ):
+            logger.info(f"加载模型: ckpt_dir={ckpt_dir}, wav2vec_dir={wav2vec_dir}")
+            pipeline = get_pipeline(
+                world_size=1,
+                ckpt_dir=ckpt_dir,
+                model_type=model_type,
+                wav2vec_dir=wav2vec_dir,
+            )
+            loaded_ckpt_dir = ckpt_dir
+            loaded_wav2vec_dir = wav2vec_dir
+            loaded_model_type = model_type
+        
+        base_seed = int(seed) if seed >= 0 else 9999
+        get_base_data(
+            pipeline,
+            cond_image_path_or_dir=cond_image,
+            base_seed=base_seed,
+            use_face_crop=use_face_crop,
+        )
+        
+        infer_params = get_infer_params()
+        sample_rate = infer_params["sample_rate"]
+        tgt_fps = infer_params["tgt_fps"]
+        cached_audio_duration = infer_params["cached_audio_duration"]
+        frame_num = infer_params["frame_num"]
+        motion_frames_num = infer_params["motion_frames_num"]
+        slice_len = frame_num - motion_frames_num
+        
+        silent_audio = create_silent_audio(duration=duration, sample_rate=sample_rate)
+        human_speech_array_slice_len = slice_len * sample_rate // tgt_fps
+        remainder = len(silent_audio) % human_speech_array_slice_len
+        if remainder > 0:
+            pad_length = human_speech_array_slice_len - remainder
+            silent_audio = np.concatenate(
+                [silent_audio, np.zeros(pad_length, dtype=silent_audio.dtype)]
+            )
+        human_speech_array_slices = silent_audio.reshape(-1, human_speech_array_slice_len)
+        
+        if len(human_speech_array_slices) == 0:
+            return jsonify({"error": "音频太短"}), 400
+        
+        stream_dir = os.path.join("chat_results", "idle")
+        os.makedirs(stream_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+        accumulated = []
+        
+        cached_audio_length_sum = sample_rate * cached_audio_duration
+        audio_end_idx = cached_audio_duration * tgt_fps
+        audio_start_idx = audio_end_idx - frame_num
+        
+        audio_dq = deque([0.0] * cached_audio_length_sum, maxlen=cached_audio_length_sum)
+        for human_speech_array in human_speech_array_slices:
+            audio_dq.extend(human_speech_array.tolist())
+            audio_array = np.array(audio_dq)
+            audio_embedding = get_audio_embedding(pipeline, audio_array, audio_start_idx, audio_end_idx)
+            torch.cuda.synchronize()
+            video = run_pipeline(pipeline, audio_embedding)
+            video = video[motion_frames_num:]
+            torch.cuda.synchronize()
+            accumulated.append(torch.from_numpy(video.cpu().numpy()))
+        
+        temp_dir = tempfile.mkdtemp()
+        silent_audio_path = os.path.join(temp_dir, "silent.wav")
+        _save_chunk_audio_to_wav(create_silent_audio(duration=duration), silent_audio_path, sample_rate)
+        
+        idle_video_path = os.path.join(stream_dir, f"idle_{timestamp}.mp4")
+        save_video_with_audio(accumulated, idle_video_path, silent_audio_path, fps=tgt_fps)
+        
+        logger.info(f"生成空闲视频: {idle_video_path}")
+        
+        return jsonify({
+            "status": "success",
+            "video_path": os.path.abspath(idle_video_path)
+        })
+    except Exception as e:
+        logger.error(f"生成空闲视频错误: {e}")
         return jsonify({"error": str(e)}), 500
 
 

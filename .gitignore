@@ -9,3 +9,8 @@ gradio_results/
 gradio_results_multigpu/
 models/
 tools/
+SoulX-FlashHead-Java/frontend/node_modules/*
+chat_results/*
+SoulX-FlashHead-Java/backend/target/*
+flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+.trae/*
