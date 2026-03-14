@@ -415,4 +415,60 @@ public class ChatService {
             idleVideoThread.interrupt();
         }
     }
+
+    /**
+     * 前端请求生成空闲视频（回复视频播放完后调用）
+     */
+    public void startIdleVideoGeneration(double duration) {
+        log.info("前端请求生成空闲视频, duration={}", duration);
+
+        // 重置状态，允许生成空闲视频
+        hasReceivedFirstReply.set(false);
+        idleVideoGenerationComplete.set(false);
+
+        // 启动一个新的线程来生成空闲视频
+        Thread idleThread = new Thread(() -> {
+            try {
+                String streamId = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
+                log.info("开始生成空闲视频, streamId: {}", streamId);
+
+                if (useHls) {
+                    // 使用 HLS 方式生成空闲视频
+                    String backendUrl = "http://localhost:8080";
+
+                    // 预创建 HLS 会话
+                    hlsStreamService.createSession(streamId);
+
+                    // 推送 HLS 地址到前端
+                    String hlsUrl = backendUrl + "/api/hls/" + streamId + "/playlist.m3u8";
+                    Map<String, Object> hlsMsg = new HashMap<>();
+                    hlsMsg.put("type", "hls_stream");
+                    hlsMsg.put("hls_url", hlsUrl);
+                    hlsMsg.put("stream_id", streamId);
+                    webSocketHandler.broadcastMessage(hlsMsg);
+
+                    // 调用 Python 服务生成空闲视频
+                    pythonServiceClient.generateIdleVideoHls(
+                        currentCondImage, currentCkptDir, currentWav2vecDir,
+                        currentModelType, currentSeed, currentUseFaceCrop,
+                        duration, streamId, backendUrl
+                    );
+                } else {
+                    // 使用原有方式生成空闲视频
+                    pythonServiceClient.setCallbackUrl("http://localhost:8080/api/callback/new-segment");
+                    pythonServiceClient.generateIdleVideo(
+                        currentCondImage, currentCkptDir, currentWav2vecDir,
+                        currentModelType, currentSeed, currentUseFaceCrop, duration,
+                        true, streamId
+                    );
+                }
+
+                log.info("空闲视频生成请求已发送");
+            } catch (Exception e) {
+                log.error("生成空闲视频失败", e);
+            }
+        });
+        idleThread.setDaemon(true);
+        idleThread.start();
+    }
 }

@@ -330,12 +330,12 @@ class HlsGeneratorDirectUpload:
             "-pix_fmt", "rgb24",
             "-s", f"{width}x{height}",
             "-r", str(self.fps),
-            "-thread_queue_size", "512",
+            "-thread_queue_size", "1024",
             "-i", "-",
             "-f", "s16le",
             "-ar", "16000",
             "-ac", "1",
-            "-thread_queue_size", "512",
+            "-thread_queue_size", "1024",
             "-i", audio_pipe,
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
@@ -343,15 +343,18 @@ class HlsGeneratorDirectUpload:
             "-level", "3.0",
             "-preset", "ultrafast",
             "-tune", "zerolatency",
-            "-crf", "23",
+            "-crf", "28",  # 稍微降低质量以换取更快的编码速度
+            "-g", str(self.fps),  # GOP 大小等于帧率（1秒一个关键帧）
+            "-keyint_min", str(self.fps),
+            "-sc_threshold", "0",
             "-c:a", "aac",
             "-b:a", "128k",
             "-f", "hls",
-            "-hls_time", "2",
+            "-hls_time", "1",  # 减少到1秒一个片段，提高实时性
             "-hls_list_size", "0",
             "-hls_segment_type", "mpegts",
             "-hls_segment_filename", os.path.join(hls_dir, "segment_%05d.ts"),
-            "-hls_flags", "+omit_endlist",
+            "-hls_flags", "+omit_endlist+split_by_time",  # 添加 split_by_time 确保按时长分割
             os.path.join(hls_dir, "playlist.m3u8")
         ]
 
@@ -537,13 +540,17 @@ class HlsGeneratorDirectUpload:
         if self.upload_thread:
             self.upload_thread.join(timeout=5)
 
+        # 通知后端流结束
         try:
-            requests.post(
-                f"{self.backend_url}/api/hls/{self.session_id}/end",
-                timeout=5
-            )
-        except:
-            pass
+            end_url = f"{self.backend_url}/api/hls/{self.session_id}/end"
+            logger.info(f"通知后端流结束: {end_url}")
+            resp = requests.post(end_url, timeout=5)
+            if resp.status_code == 200:
+                logger.info(f"后端流结束通知成功: {self.session_id}")
+            else:
+                logger.warning(f"后端流结束通知失败: {resp.status_code}")
+        except Exception as e:
+            logger.error(f"通知后端流结束失败: {e}")
 
         logger.info(f"HLS 生成停止: {self.session_id}")
 

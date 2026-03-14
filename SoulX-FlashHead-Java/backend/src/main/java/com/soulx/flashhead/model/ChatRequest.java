@@ -12,4 +12,5 @@ public class ChatRequest {
     private String modelType;
     private Integer seed;
     private Boolean useFaceCrop;
+    private Double duration;  // 用于空闲视频生成时长
 }

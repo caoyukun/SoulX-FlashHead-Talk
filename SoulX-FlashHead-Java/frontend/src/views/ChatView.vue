@@ -99,7 +99,7 @@
             <div class="time-display">
               <span>{{ formatTime(currentGlobalTime) }}</span>
               <span>/</span>
-              <span>{{ formatTime(totalDuration) }}</span>
+              <span>{{ useHls && totalDuration.value === 0 ? 'Live' : formatTime(totalDuration) }}</span>
             </div>
             
             <!-- 播放/暂停按钮 -->
@@ -340,6 +340,8 @@ const isDownloading = ref(false)
 const totalDuration = ref(0)
 const currentGlobalTime = ref(0)
 const globalProgress = computed(() => {
+  // HLS 直播模式下不显示进度条
+  if (useHls.value && totalDuration.value === 0) return 0
   if (totalDuration.value === 0) return 0
   return Math.min(100, (currentGlobalTime.value / totalDuration.value) * 100)
 })
@@ -382,13 +384,18 @@ const settings = reactive({
 })
 
 // 获取头像URL - 直接使用相对路径，不走视频流API
-const getAvatarUrl = () => {
+// 头像 URL 缓存
+const avatarUrlCache = computed(() => {
   // 如果路径以 http 开头，直接使用
   if (settings.condImage.startsWith('http')) {
     return settings.condImage
   }
-  // 否则使用相对路径，添加前缀避免缓存问题
-  return `/${settings.condImage}?t=${Date.now()}`
+  // 否则使用相对路径
+  return `/${settings.condImage}`
+})
+
+const getAvatarUrl = () => {
+  return avatarUrlCache.value
 }
 
 // 格式化时间显示
@@ -955,14 +962,16 @@ const initHlsPlayer = async (hlsUrl) => {
     hls = new Hls({
       enableWorker: true,
       lowLatencyMode: true,
-      backBufferLength: 90,
-      maxBufferLength: 30,
-      maxMaxBufferLength: 60,
-      liveSyncDurationCount: 3,
-      liveMaxLatencyDurationCount: 10,
+      backBufferLength: 30,  // 减少后退缓冲区
+      maxBufferLength: 10,   // 减少最大缓冲区，更快开始播放
+      maxMaxBufferLength: 20,
+      liveSyncDurationCount: 2,  // 减少同步时长计数
+      liveMaxLatencyDurationCount: 5,
       fragLoadingTimeOut: 20000,
       manifestLoadingTimeOut: 10000,
       levelLoadingTimeOut: 10000,
+      // 减少初始播放需要的片段数
+      liveDurationInfinity: false,
       // 添加更多调试信息
       debug: false
     })
@@ -1012,6 +1021,72 @@ const initHlsPlayer = async (hlsUrl) => {
     hls.on(Hls.Events.BUFFER_APPENDED, () => {
       isHlsBuffering.value = false
     })
+
+    // 监听播放结束事件
+    hls.on(Hls.Events.ENDED, () => {
+      console.log('HLS: Playback ended')
+      // 播放结束后销毁 HLS 播放器，切换回空闲视频
+      destroyHlsPlayer()
+      useHls.value = false
+      // 触发空闲视频播放
+      playIdleVideo()
+    })
+
+    // 监听直播结束（当播放列表包含 ENDLIST 时）
+    hls.on(Hls.Events.LEVEL_UPDATED, (event, data) => {
+      // 检查是否是点播结束
+      if (data.details && data.details.endList) {
+        console.log('HLS: End list detected in LEVEL_UPDATED')
+      }
+    })
+
+    // 监听 manifest 更新，检测 ENDLIST
+    hls.on(Hls.Events.MANIFEST_LOADED, (event, data) => {
+      console.log('HLS: Manifest loaded, endList:', data.endList)
+      if (data.endList) {
+        console.log('HLS: End list detected in MANIFEST_LOADED')
+        // 流已结束，等待播放完成后切换
+      }
+    })
+
+    // 使用定时器检查播放状态
+    const checkEndInterval = setInterval(() => {
+      if (!hls || !useHls.value) {
+        clearInterval(checkEndInterval)
+        return
+      }
+      
+      // 检查是否播放到了结尾
+      if (hlsVideoPlayer.value && hlsVideoPlayer.value.ended) {
+        console.log('HLS: Video element ended')
+        clearInterval(checkEndInterval)
+        destroyHlsPlayer()
+        useHls.value = false
+        playIdleVideo()
+      }
+      
+      // 检查是否 stalled（流结束但没有触发 ended 事件）
+      if (hlsVideoPlayer.value && 
+          hlsVideoPlayer.value.currentTime > 0 &&
+          hlsVideoPlayer.value.paused &&
+          !isPaused.value &&
+          !isHlsBuffering.value) {
+        // 可能是流结束了
+        const buffered = hlsVideoPlayer.value.buffered
+        if (buffered.length > 0) {
+          const endTime = buffered.end(buffered.length - 1)
+          const currentTime = hlsVideoPlayer.value.currentTime
+          // 如果当前时间接近缓冲结束时间，可能是流结束了
+          if (endTime - currentTime < 0.5) {
+            console.log('HLS: Detected end by stalled state')
+            clearInterval(checkEndInterval)
+            destroyHlsPlayer()
+            useHls.value = false
+            playIdleVideo()
+          }
+        }
+      }
+    }, 1000)
 
     // 先 attachMedia 再 loadSource
     hls.attachMedia(hlsVideoPlayer.value)
@@ -1071,6 +1146,16 @@ const destroyHlsPlayer = () => {
   currentHlsUrl.value = null
 }
 
+const playIdleVideo = () => {
+  console.log('请求生成空闲视频')
+  // 向后端请求生成空闲视频
+  chatApi.generateIdleVideo({ duration: 3.0 }).then(() => {
+    console.log('空闲视频生成请求已发送')
+  }).catch(err => {
+    console.error('请求生成空闲视频失败:', err)
+  })
+}
+
 const handleHlsTimeUpdate = () => {
   if (hlsVideoPlayer.value) {
     currentGlobalTime.value = hlsVideoPlayer.value.currentTime
@@ -1079,7 +1164,14 @@ const handleHlsTimeUpdate = () => {
 
 const handleHlsMetadataLoaded = () => {
   if (hlsVideoPlayer.value) {
-    totalDuration.value = hlsVideoPlayer.value.duration || 0
+    const duration = hlsVideoPlayer.value.duration
+    // HLS 直播模式下 duration 可能是 Infinity
+    if (duration && duration !== Infinity && !isNaN(duration)) {
+      totalDuration.value = duration
+    } else {
+      // 直播模式，不显示总时长或显示为 "Live"
+      totalDuration.value = 0
+    }
   }
 }
 
@@ -1282,6 +1374,8 @@ onUnmounted(() => {
   object-fit: cover;
   opacity: 0;
   z-index: 1;
+  transition: opacity 0.3s ease;
+  background: #000;
 }
 
 .digital-human-video.active {

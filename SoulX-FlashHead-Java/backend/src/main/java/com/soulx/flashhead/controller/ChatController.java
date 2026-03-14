@@ -58,9 +58,24 @@ public class ChatController {
             request.getSeed() != null ? request.getSeed() : 9999,
             request.getUseFaceCrop() != null ? request.getUseFaceCrop() : false
         );
-        
+
         Map<String, String> result = new HashMap<>();
         result.put("status", "initialized");
+        return result;
+    }
+
+    @PostMapping("/idle-video")
+    public Map<String, String> generateIdleVideo(@RequestBody ChatRequest request) {
+        log.info("收到空闲视频生成请求");
+
+        Double duration = request.getDuration() != null ? request.getDuration() : 3.0;
+
+        // 启动空闲视频生成
+        chatService.startIdleVideoGeneration(duration);
+
+        Map<String, String> result = new HashMap<>();
+        result.put("status", "started");
+        result.put("message", "空闲视频生成已启动");
         return result;
     }
 }
