@@ -12,7 +12,9 @@ import java.io.File;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 @Slf4j
@@ -39,6 +41,15 @@ public class ChatService {
     private int currentSeed;
     private boolean currentUseFaceCrop;
     private File currentAudioFile = null;
+    
+    private final BlockingQueue<String> pendingVideoQueue = new LinkedBlockingQueue<>();
+    private volatile boolean isPushingVideos = false;
+    private Thread videoPushThread = null;
+    private volatile long lastPushTime = 0;
+    private static final long MIN_PUSH_INTERVAL_MS = 2000;
+    
+    private final AtomicBoolean idleVideoGenerationComplete = new AtomicBoolean(false);
+    private String currentFinalVideoPath = null;
 
     public ChatService(VolcengineClient volcengineClient, 
                        PythonServiceClient pythonServiceClient,
@@ -50,6 +61,10 @@ public class ChatService {
         this.webSocketHandler = webSocketHandler;
         this.properties = properties;
         this.videoStreamService = videoStreamService;
+    }
+    
+    public String getCurrentFinalVideoPath() {
+        return currentFinalVideoPath;
     }
 
     public List<ChatMessage> getChatHistory() {
@@ -69,9 +84,87 @@ public class ChatService {
         this.currentSeed = seed;
         this.currentUseFaceCrop = useFaceCrop;
         
+        pendingVideoQueue.clear();
         sessionVideoSegments.clear();
         hasReceivedFirstReply.set(false);
+        idleVideoGenerationComplete.set(false);
+        
+        startVideoPushThread();
         startIdleVideoGeneration();
+    }
+    
+    private void startVideoPushThread() {
+        if (videoPushThread != null && videoPushThread.isAlive()) {
+            return;
+        }
+        
+        isPushingVideos = true;
+        videoPushThread = new Thread(() -> {
+            log.info("视频推送线程已启动");
+            while (isPushingVideos && !Thread.currentThread().isInterrupted()) {
+                try {
+                    // 检查是否有 pending 的回复视频，有回复视频时不再推送空闲视频
+                    if (hasReceivedFirstReply.get() || hasPendingReply.get()) {
+                        // 清空待推送的空闲视频队列，避免穿插
+                        if (!pendingVideoQueue.isEmpty()) {
+                            pendingVideoQueue.clear();
+                            log.info("有回复视频，清空空闲视频队列");
+                        }
+                        Thread.sleep(100);
+                        continue;
+                    }
+                    
+                    // 正常空闲视频推送逻辑
+                    String videoPath = pendingVideoQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    if (videoPath != null) {
+                        // 再次检查状态，防止在等待期间状态发生变化
+                        if (hasReceivedFirstReply.get() || hasPendingReply.get()) {
+                            log.info("状态已变化，丢弃空闲视频: {}", videoPath);
+                            continue;
+                        }
+                        
+                        // 检查是否满足最小推送间隔
+                        long now = System.currentTimeMillis();
+                        long timeSinceLastPush = now - lastPushTime;
+                        if (timeSinceLastPush < MIN_PUSH_INTERVAL_MS) {
+                            // 还没到时间，把视频放回队列
+                            pendingVideoQueue.offer(videoPath);
+                            Thread.sleep(MIN_PUSH_INTERVAL_MS - timeSinceLastPush);
+                        } else {
+                            pushVideoToFrontend(videoPath);
+                            lastPushTime = now;
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (Exception e) {
+                    log.error("视频推送线程错误", e);
+                    try {
+                        Thread.sleep(100);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+            log.info("视频推送线程已停止");
+        });
+        videoPushThread.setDaemon(true);
+        videoPushThread.start();
+    }
+    
+    private void pushVideoToFrontend(String videoPath) {
+        sessionVideoSegments.add(videoPath);
+        log.info("推送视频片段到前端: {}", videoPath);
+        
+        Map<String, Object> videoMsg = new HashMap<>();
+        videoMsg.put("type", "video_segment");
+        videoMsg.put("path", videoPath);
+        webSocketHandler.broadcastMessage(videoMsg);
+        
+        // 同时添加到实时视频流
+        videoStreamService.addSegment(videoPath);
     }
 
     private void startIdleVideoGeneration() {
@@ -89,20 +182,42 @@ public class ChatService {
                         continue;
                     }
                     
+                    // 如果空闲视频生成已完成，等待一会儿再重新开始
+                    if (idleVideoGenerationComplete.get()) {
+                        Thread.sleep(1000);
+                        idleVideoGenerationComplete.set(false);
+                    }
+                    
                     if (isGeneratingIdle.compareAndSet(false, true)) {
                         try {
-                            String idleVideoPath = pythonServiceClient.generateIdleVideo(
+                            // 再次检查状态，避免在检查后状态变化
+                            if (hasReceivedFirstReply.get() || hasPendingReply.get()) {
+                                log.info("状态已变化，跳过本次空闲视频生成");
+                                continue;
+                            }
+                            
+                            // 使用流式回调生成空闲视频，逐段获取
+                            String streamId = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
+                            log.info("开始流式生成空闲视频, streamId: {}", streamId);
+                            
+                            // 首先设置回调 URL
+                            pythonServiceClient.setCallbackUrl("http://localhost:8080/api/callback/new-segment");
+                            
+                            // 调用 Python 服务生成空闲视频（使用流式回调）
+                            pythonServiceClient.generateIdleVideo(
                                 currentCondImage, currentCkptDir, currentWav2vecDir,
-                                currentModelType, currentSeed, currentUseFaceCrop, 3.0
+                                currentModelType, currentSeed, currentUseFaceCrop, 15.0,
+                                true, streamId
                             );
                             
-                            sessionVideoSegments.add(idleVideoPath);
-                            log.info("添加空闲视频片段: {}", idleVideoPath);
+                            // 等待空闲视频生成完成
+                            while (!idleVideoGenerationComplete.get() && 
+                                   !hasReceivedFirstReply.get() && 
+                                   !hasPendingReply.get()) {
+                                Thread.sleep(100);
+                            }
                             
-                            Map<String, Object> videoMsg = new HashMap<>();
-                            videoMsg.put("type", "video_segment");
-                            videoMsg.put("path", idleVideoPath);
-                            webSocketHandler.broadcastMessage(videoMsg);
+                            log.info("空闲视频生成流程完成");
                         } finally {
                             isGeneratingIdle.set(false);
                         }
@@ -124,18 +239,28 @@ public class ChatService {
     }
 
     public void addVideoSegment(String videoPath) {
-        sessionVideoSegments.add(videoPath);
-        log.info("添加视频片段: {}", videoPath);
+        log.info("收到视频片段: {}", videoPath);
         
-        // 检查是否是第一个回复视频
+        // 检查是否是回复视频
         boolean isReply = !videoPath.contains("idle");
-        if (isReply && !hasReceivedFirstReply.get()) {
-            hasReceivedFirstReply.set(true);
-            log.info("收到第一个回复视频，停止生成空闲视频");
+        if (isReply) {
+            // 只要收到回复视频，就立即设置标志，停止空闲视频生成
+            if (!hasReceivedFirstReply.get()) {
+                hasReceivedFirstReply.set(true);
+                log.info("收到第一个回复视频，停止生成空闲视频");
+            }
+            // 回复视频直接推送到前端，不通过队列
+            pushVideoToFrontend(videoPath);
+        } else {
+            // 空闲视频放入队列，等待缓慢推送
+            try {
+                pendingVideoQueue.put(videoPath);
+                log.info("空闲视频已加入推送队列: {}", videoPath);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.error("添加空闲视频到队列失败", e);
+            }
         }
-        
-        // 同时添加到实时视频流
-        videoStreamService.addSegment(videoPath);
     }
     
     private void cleanupAudioFile() {
@@ -150,15 +275,34 @@ public class ChatService {
         }
     }
     
-    public void onVideoGenerationComplete() {
+    public void onVideoGenerationComplete(String finalVideoPath) {
         log.info("视频生成完成");
-        cleanupAudioFile();
-        hasPendingReply.set(false);
-        processingSessions.clear();
         
-        // 重新开始生成空闲视频
-        hasReceivedFirstReply.set(false);
-        log.info("重新开始生成空闲视频");
+        // 保存完整视频路径（如果是回复视频）
+        if (hasPendingReply.get() && finalVideoPath != null) {
+            currentFinalVideoPath = finalVideoPath;
+            log.info("保存完整回复视频路径: {}", finalVideoPath);
+        }
+        
+        // 检查是否是回复视频完成
+        if (hasPendingReply.get()) {
+            cleanupAudioFile();
+            hasPendingReply.set(false);
+            processingSessions.clear();
+            
+            // 重新开始生成空闲视频
+            hasReceivedFirstReply.set(false);
+            idleVideoGenerationComplete.set(false);
+            log.info("回复视频生成完成，重新开始生成空闲视频");
+        } else {
+            // 空闲视频生成完成
+            idleVideoGenerationComplete.set(true);
+            log.info("空闲视频生成完成");
+        }
+    }
+    
+    public void onVideoGenerationComplete() {
+        onVideoGenerationComplete(null);
     }
     
     public void processChatMessage(String userMessage, String sessionId) {
@@ -208,6 +352,7 @@ public class ChatService {
                 webSocketHandler.broadcastMessage(errorMsg);
                 cleanupAudioFile();
                 hasPendingReply.set(false);
+                hasReceivedFirstReply.set(false);
                 processingSessions.remove(sessionId);
             }
         }).start();

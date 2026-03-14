@@ -27,12 +27,8 @@ public class VideoCallbackController {
         String videoPath = (String) data.get("path");
         log.info("收到新视频段回调: {}", videoPath);
         
+        // 让 ChatService 来处理添加和推送
         chatService.addVideoSegment(videoPath);
-        
-        Map<String, Object> videoMsg = new HashMap<>();
-        videoMsg.put("type", "video_segment");
-        videoMsg.put("path", videoPath);
-        webSocketHandler.broadcastMessage(videoMsg);
         
         Map<String, Object> result = new HashMap<>();
         result.put("status", "success");
@@ -40,9 +36,10 @@ public class VideoCallbackController {
     }
     
     @PostMapping("/generation-complete")
-    public Map<String, Object> handleGenerationComplete() {
+    public Map<String, Object> handleGenerationComplete(@RequestBody(required = false) Map<String, Object> data) {
         log.info("收到视频生成完成回调");
-        chatService.onVideoGenerationComplete();
+        String finalVideo = data != null ? (String) data.get("final_video") : null;
+        chatService.onVideoGenerationComplete(finalVideo);
         
         Map<String, Object> result = new HashMap<>();
         result.put("status", "success");

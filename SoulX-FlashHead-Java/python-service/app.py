@@ -186,13 +186,17 @@ def notify_backend_new_segment(video_path):
             logger.warning(f"通知后端失败: {e}")
 
 
-def notify_backend_generation_complete():
+def notify_backend_generation_complete(final_video=None):
     """通知Java后端视频生成完成"""
     if callback_url:
         try:
             complete_url = callback_url.replace("/new-segment", "/generation-complete")
+            data = {}
+            if final_video:
+                data["final_video"] = final_video
             response = requests.post(
                 complete_url,
+                json=data,
                 timeout=5
             )
             logger.info(f"通知后端视频生成完成, 状态: {response.status_code}")
@@ -374,6 +378,12 @@ def generate_video_streaming():
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
         accumulated = []
         
+        # 复制一份音频文件，避免原文件被删除
+        audio_copy_path = os.path.join(stream_dir, f"audio_{stream_id}.wav")
+        import shutil
+        shutil.copy2(audio_path, audio_copy_path)
+        audio_path = audio_copy_path
+        
         segment_audio_paths = {}
         num_segments = (total_chunks + CHUNKS_PER_SEGMENT - 1) // CHUNKS_PER_SEGMENT
         for segment_id in range(num_segments):
@@ -465,22 +475,23 @@ def generate_video_streaming():
         
         worker_thread.join()
         
-        if use_streaming_callback:
-            notify_backend_generation_complete()
-            # 异步模式下不生成最终视频（音频文件可能已被删除）
-            return jsonify({
-                "status": "success",
-                "stream_id": stream_id,
-                "segments": segment_paths
-            })
-        
-        # 同步模式下生成最终视频
+        # 无论同步和异步模式都生成最终视频
         output_dir = "chat_results"
         os.makedirs(output_dir, exist_ok=True)
         final_filename = f"res_{stream_id}.mp4"
         final_path = os.path.join(output_dir, final_filename)
         save_video_with_audio(accumulated, final_path, audio_path, fps=tgt_fps)
         
+        if use_streaming_callback:
+            notify_backend_generation_complete(os.path.abspath(final_path))
+            return jsonify({
+                "status": "success",
+                "stream_id": stream_id,
+                "segments": segment_paths,
+                "final_video": os.path.abspath(final_path)
+            })
+        
+        # 同步模式响应
         return jsonify({
             "status": "success",
             "stream_id": stream_id,
@@ -500,16 +511,18 @@ def generate_idle_video():
     主要功能：
     - 根据条件图像生成带有微表情和自然动作的空闲视频
     - 使用静音音频作为输入驱动面部动作
-    - 生成的视频可以用于对话间隙或等待状态
+    - 逐段生成并通过回调发送给后端，保证实时性
     
     请求参数：
-    - duration: 视频时长（秒），默认3.0
+    - duration: 视频总时长（秒），默认3.0
     - cond_image: 条件图像路径，默认 examples/girl.png
     - ckpt_dir: 模型检查点目录
     - wav2vec_dir: Wav2Vec模型目录
     - model_type: 模型类型（lite/full）
     - seed: 随机种子
     - use_face_crop: 是否使用人脸裁剪
+    - use_streaming_callback: 是否使用流式回调，默认False
+    - stream_id: 流ID，用于标识此次生成
     
     返回：
     - 包含生成视频路径的JSON响应
@@ -529,6 +542,8 @@ def generate_idle_video():
         model_type = data.get('model_type', 'lite')
         seed = data.get('seed', 9999)
         use_face_crop = data.get('use_face_crop', False)
+        use_streaming_callback = data.get('use_streaming_callback', False)
+        stream_id = data.get('stream_id', datetime.now().strftime("%Y%m%d-%H%M%S"))
         
         global pipeline, loaded_ckpt_dir, loaded_wav2vec_dir, loaded_model_type
         
@@ -582,22 +597,80 @@ def generate_idle_video():
         os.makedirs(stream_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
         accumulated = []
+        segment_paths = []
+        
+        # 计算每个片段的时长（秒）
+        segment_duration = slice_len / tgt_fps
+        logger.info(f"每个片段时长: {segment_duration:.2f}秒, 总片段数: {len(human_speech_array_slices)}")
+        
+        # 准备每个片段的静音音频
+        segment_audio_paths = {}
+        num_segments = len(human_speech_array_slices)
+        for segment_id in range(num_segments):
+            audio_concat = human_speech_array_slices[segment_id]
+            segment_audio_name = f"idle_audio_{stream_id}_seg_{segment_id:04d}.wav"
+            segment_audio_path = os.path.join(stream_dir, segment_audio_name)
+            _save_chunk_audio_to_wav(
+                audio_concat,
+                segment_audio_path,
+                sample_rate=sample_rate,
+            )
+            segment_audio_paths[segment_id] = segment_audio_path
         
         cached_audio_length_sum = sample_rate * cached_audio_duration
         audio_end_idx = cached_audio_duration * tgt_fps
         audio_start_idx = audio_end_idx - frame_num
         
         audio_dq = deque([0.0] * cached_audio_length_sum, maxlen=cached_audio_length_sum)
-        for human_speech_array in human_speech_array_slices:
+        frame_buffer = []
+        
+        for chunk_idx, human_speech_array in enumerate(human_speech_array_slices):
             audio_dq.extend(human_speech_array.tolist())
             audio_array = np.array(audio_dq)
             audio_embedding = get_audio_embedding(pipeline, audio_array, audio_start_idx, audio_end_idx)
             torch.cuda.synchronize()
+            start_time = time.time()
             video = run_pipeline(pipeline, audio_embedding)
             video = video[motion_frames_num:]
             torch.cuda.synchronize()
-            accumulated.append(torch.from_numpy(video.cpu().numpy()))
+            logger.info(f"空闲视频 chunk-{chunk_idx} 推理完成, 耗时: {time.time() - start_time:.2f}s")
+            chunk_frames_np = video.cpu().numpy()
+            chunk_frames = torch.from_numpy(chunk_frames_np)
+            accumulated.append(chunk_frames)
+            frame_buffer.append(chunk_frames)
+            
+            # 每个chunk生成一个视频片段
+            segment_id = chunk_idx
+            segment_audio_path = segment_audio_paths[segment_id]
+            segment_path = os.path.join(
+                stream_dir, f"idle_{stream_id}_seg_{segment_id:04d}.mp4"
+            )
+            save_video_with_audio(
+                frame_buffer,
+                segment_path,
+                segment_audio_path,
+                fps=tgt_fps,
+            )
+            segment_abs_path = os.path.abspath(segment_path)
+            segment_paths.append(segment_abs_path)
+            
+            # 如果启用了流式回调，立即通知后端
+            if use_streaming_callback:
+                notify_backend_new_segment(segment_abs_path)
+            
+            frame_buffer = []
         
+        logger.info(f"空闲视频生成完成, 总片段数: {len(segment_paths)}")
+        
+        if use_streaming_callback:
+            notify_backend_generation_complete()
+            return jsonify({
+                "status": "success",
+                "stream_id": stream_id,
+                "segments": segment_paths
+            })
+        
+        # 非流式模式，生成完整视频
         temp_dir = tempfile.mkdtemp()
         silent_audio_path = os.path.join(temp_dir, "silent.wav")
         _save_chunk_audio_to_wav(create_silent_audio(duration=duration), silent_audio_path, sample_rate)

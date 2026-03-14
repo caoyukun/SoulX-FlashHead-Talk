@@ -195,6 +195,12 @@ public class PythonServiceClient {
     public String generateIdleVideo(String condImage, String ckptDir, String wav2vecDir,
                                      String modelType, int seed, boolean useFaceCrop,
                                      double duration) throws IOException {
+        return generateIdleVideo(condImage, ckptDir, wav2vecDir, modelType, seed, useFaceCrop, duration, false, null);
+    }
+    
+    public String generateIdleVideo(String condImage, String ckptDir, String wav2vecDir,
+                                     String modelType, int seed, boolean useFaceCrop,
+                                     double duration, boolean useStreamingCallback, String streamId) throws IOException {
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("duration", duration);
         requestBody.put("cond_image", condImage);
@@ -203,6 +209,10 @@ public class PythonServiceClient {
         requestBody.put("model_type", modelType);
         requestBody.put("seed", seed);
         requestBody.put("use_face_crop", useFaceCrop);
+        requestBody.put("use_streaming_callback", useStreamingCallback);
+        if (streamId != null) {
+            requestBody.put("stream_id", streamId);
+        }
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
 
@@ -220,7 +230,11 @@ public class PythonServiceClient {
 
             String responseBody = response.body().string();
             Map<String, Object> result = objectMapper.readValue(responseBody, Map.class);
-            return (String) result.get("video_path");
+            if (useStreamingCallback) {
+                return (String) result.get("stream_id");
+            } else {
+                return (String) result.get("video_path");
+            }
         }
     }
 }

@@ -70,7 +70,31 @@
           </div>
           
           <!-- 底部控制栏 -->
-          <div class="bottom-controls">
+          <div class="bottom-controls" ref="customControls">
+            <!-- 进度条 -->
+            <div class="progress-container" @click.stop="handleProgressClick">
+              <div class="progress-bar" :style="{ width: globalProgress + '%' }"></div>
+            </div>
+            
+            <!-- 时间显示 -->
+            <div class="time-display">
+              <span>{{ formatTime(currentGlobalTime) }}</span>
+              <span>/</span>
+              <span>{{ formatTime(totalDuration) }}</span>
+            </div>
+            
+            <!-- 播放/暂停按钮 -->
+            <button class="control-btn" @click.stop="togglePlay">
+              <svg v-if="!isPaused" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="6" y="4" width="4" height="16"></rect>
+                <rect x="14" y="4" width="4" height="16"></rect>
+              </svg>
+              <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+              </svg>
+            </button>
+            
+            <!-- 音量控制 -->
             <button class="control-btn" :class="{ active: isMuted }" @click.stop="toggleMute">
               <svg v-if="isMuted" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
@@ -246,6 +270,9 @@
               <el-button type="primary" @click="initializeModel" :loading="isInitializing" style="width: 100%">
                 初始化模型
               </el-button>
+              <el-button type="success" @click="downloadCompleteVideo" :disabled="!currentFinalVideoPath" style="width: 100%; margin-top: 10px;">
+                📥 下载完整视频
+              </el-button>
             </div>
           </div>
         </div>
@@ -264,6 +291,7 @@ import { chatApi, videoApi } from '../api'
 const videoPlayer1 = ref(null)
 const videoPlayer2 = ref(null)
 const chatMessages = ref(null)
+const customControls = ref(null)
 
 // 状态
 const inputMessage = ref('')
@@ -277,6 +305,16 @@ const showOverlay = ref(true)
 const showChatPanel = ref(true)
 const showSettings = ref(false)
 const unreadCount = ref(0)
+const currentFinalVideoPath = ref(null)
+const isDownloading = ref(false)
+
+// 进度条相关状态
+const totalDuration = ref(0)
+const currentGlobalTime = ref(0)
+const globalProgress = computed(() => {
+  if (totalDuration.value === 0) return 0
+  return Math.min(100, (currentGlobalTime.value / totalDuration.value) * 100)
+})
 
 // 消息列表（本地管理，立即显示）
 const messages = ref([])
@@ -323,6 +361,27 @@ const getAvatarUrl = () => {
   }
   // 否则使用相对路径，添加前缀避免缓存问题
   return `/${settings.condImage}?t=${Date.now()}`
+}
+
+// 格式化时间显示
+const formatTime = (seconds) => {
+  if (!seconds || isNaN(seconds)) return '00:00'
+  const mins = Math.floor(seconds / 60)
+  const secs = Math.floor(seconds % 60)
+  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+}
+
+// 重新计算总时长和每个视频段的起始偏移
+const recalculateTotalDuration = () => {
+  let total = 0
+  videoSegments.value.forEach((segment) => {
+    segment.startOffset = total
+    if (segment.duration && !isNaN(segment.duration)) {
+      total += segment.duration
+    }
+  })
+  totalDuration.value = total
+  console.log('重新计算总时长:', totalDuration.value)
 }
 
 // 滚动到底部
@@ -487,21 +546,119 @@ const playSegment = (index) => {
   }
 }
 
-const handleTimeUpdate = () => {}
+// 处理时间更新，计算全局进度
+const handleTimeUpdate = () => {
+  if (currentSegmentIndex.value >= 0) {
+    const player = currentVideoPlayer.value
+    const segment = videoSegments.value[currentSegmentIndex.value]
+    if (player?.value && segment && segment.startOffset !== undefined) {
+      currentGlobalTime.value = segment.startOffset + (player.value.currentTime || 0)
+    }
+  }
+}
 
+// 处理元数据加载，记录视频时长
 const handleMetadataLoaded = (e) => {
   const player = e.target
+  console.log('元数据加载:', player.duration, 'src:', player.src)
+  
+  // 找到对应加载的视频段（使用更宽松的匹配）
   for (let i = 0; i < videoSegments.value.length; i++) {
     const segment = videoSegments.value[i]
+    // 简单的路径匹配，避免完整URL比较问题
     const segmentFilename = segment.url.split('/').pop()
     const playerFilename = player.src.split('/').pop()
     
-    if (segmentFilename === playerFilename) {
-      if (!segment.duration && player.duration) {
+    if (segmentFilename === playerFilename || segment.url === player.src) {
+      if ((segment.duration === undefined || segment.duration === 0 || isNaN(segment.duration)) && player.duration && !isNaN(player.duration)) {
         segment.duration = player.duration
+        console.log('视频段', i, '时长已设置:', segment.duration)
+        recalculateTotalDuration()
       }
       break
     }
+  }
+}
+
+// 处理进度条点击，跳转到指定位置
+const handleProgressClick = (event) => {
+  if (!customControls.value || totalDuration.value === 0) return
+  
+  const rect = customControls.value.getBoundingClientRect()
+  const x = event.clientX - rect.left
+  const percentage = Math.max(0, Math.min(1, x / rect.width))
+  const targetTime = percentage * totalDuration.value
+  
+  console.log('跳转到时间:', targetTime)
+  
+  // 找到对应的视频段
+  let targetIndex = 0
+  let accumulatedTime = 0
+  for (let i = 0; i < videoSegments.value.length; i++) {
+    const segment = videoSegments.value[i]
+    if (!segment.duration || isNaN(segment.duration)) continue
+    
+    if (targetTime < accumulatedTime + segment.duration) {
+      targetIndex = i
+      break
+    }
+    accumulatedTime += segment.duration
+    targetIndex = i
+  }
+  
+  // 切换到目标视频段并设置播放位置
+  if (targetIndex !== currentSegmentIndex.value) {
+    currentPlayerIndex.value = 0
+    playSegment(targetIndex)
+  }
+  
+  // 等待视频加载后设置播放位置
+  setTimeout(() => {
+    const player = currentVideoPlayer.value
+    if (player?.value && videoSegments.value[targetIndex]) {
+      const segment = videoSegments.value[targetIndex]
+      const localTime = targetTime - segment.startOffset
+      player.value.currentTime = Math.max(0, Math.min(localTime, segment.duration || 0))
+    }
+  }, 200)
+}
+
+// 切换播放/暂停
+const togglePlay = () => {
+  const player = currentVideoPlayer.value
+  if (!player?.value) return
+  
+  hasUserInteracted.value = true
+  
+  if (isPaused.value) {
+    player.value.play().catch(() => {})
+    isPaused.value = false
+  } else {
+    player.value.pause()
+    isPaused.value = true
+  }
+}
+
+const downloadCompleteVideo = async () => {
+  if (!currentFinalVideoPath.value) {
+    ElMessage.warning('暂无可下载的完整视频')
+    return
+  }
+  
+  isDownloading.value = true
+  try {
+    const link = document.createElement('a')
+    link.href = '/api/video/download-complete'
+    link.download = 'SoulX-FlashHead_' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.mp4'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    ElMessage.success('完整视频下载已开始')
+  } catch (error) {
+    console.error('下载失败:', error)
+    ElMessage.error('下载失败: ' + (error.message || error))
+  } finally {
+    isDownloading.value = false
   }
 }
 
@@ -575,20 +732,28 @@ const toggleMute = () => {
 }
 
 const addVideoSegment = (path) => {
+  console.log('addVideoSegment called:', path)
+  
+  const type = path.includes('idle') ? 'idle' : 'reply'
   const videoUrl = videoApi.getVideoUrl(path)
   
   const newSegment = {
     url: videoUrl,
     path,
-    duration: undefined
+    type,
+    duration: undefined,
+    startOffset: totalDuration.value
   }
   videoSegments.value.push(newSegment)
   
+  // 使用临时video快速获取时长
   if (tempVideo) {
     tempVideo.src = videoUrl
     tempVideo.onloadedmetadata = () => {
-      if (!newSegment.duration && tempVideo.duration) {
+      if (newSegment.duration === undefined || isNaN(newSegment.duration)) {
         newSegment.duration = tempVideo.duration
+        console.log('快速获取视频段', videoSegments.value.length - 1, '时长:', newSegment.duration)
+        recalculateTotalDuration()
       }
     }
     tempVideo.load()
@@ -678,15 +843,33 @@ const handleWebSocketMessage = (data) => {
   }
 }
 
+const checkHasCompleteVideo = async () => {
+  try {
+    const response = await fetch('/api/video/has-complete-video')
+    const data = await response.json()
+    if (data.hasVideo) {
+      currentFinalVideoPath.value = data.path
+    } else {
+      currentFinalVideoPath.value = null
+    }
+  } catch (error) {
+    console.error('检查完整视频状态失败:', error)
+  }
+}
+
 const initializeModel = async () => {
   isInitializing.value = true
   try {
     await chatApi.initialize(settings)
+    // 重置视频队列
     videoSegments.value = []
     currentSegmentIndex.value = -1
+    totalDuration.value = 0
+    currentGlobalTime.value = 0
     currentPlayerIndex.value = 0
     videoReadyState[0] = false
     videoReadyState[1] = false
+    currentFinalVideoPath.value = null
     ElMessage.success('模型初始化成功')
     showSettings.value = false
   } catch (error) {
@@ -736,6 +919,13 @@ const sendMessage = async () => {
 watch(showChatPanel, (newVal) => {
   if (newVal) {
     unreadCount.value = 0
+  }
+})
+
+// 监听设置面板打开，检查是否有完整视频
+watch(showSettings, (newVal) => {
+  if (newVal) {
+    checkHasCompleteVideo()
   }
 })
 
@@ -920,7 +1110,37 @@ onUnmounted(() => {
 /* 底部控制栏 */
 .bottom-controls {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+}
+
+.progress-container {
+  width: 100%;
+  height: 6px;
+  background-color: rgba(255,255,255,0.3);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 3px;
+  transition: width 0.1s linear;
+}
+
+.time-display {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: white;
+  font-size: 14px;
+}
+
+.control-buttons {
+  display: flex;
+  gap: 16px;
 }
 
 .control-btn {
