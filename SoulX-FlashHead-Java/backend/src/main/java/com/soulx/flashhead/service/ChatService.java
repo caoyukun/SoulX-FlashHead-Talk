@@ -25,10 +25,11 @@ public class ChatService {
     private final ChatWebSocketHandler webSocketHandler;
     private final FlashHeadProperties properties;
     private final VideoStreamService videoStreamService;
-    
+    private final HlsStreamService hlsStreamService;
+
     private final List<ChatMessage> chatHistory = Collections.synchronizedList(new ArrayList<>());
     private final Map<String, Boolean> processingSessions = new ConcurrentHashMap<>();
-    
+
     private final List<String> sessionVideoSegments = Collections.synchronizedList(new ArrayList<>());
     private final AtomicBoolean isGeneratingIdle = new AtomicBoolean(false);
     private final AtomicBoolean hasReceivedFirstReply = new AtomicBoolean(false);
@@ -41,26 +42,32 @@ public class ChatService {
     private int currentSeed;
     private boolean currentUseFaceCrop;
     private File currentAudioFile = null;
-    
+
     private final BlockingQueue<String> pendingVideoQueue = new LinkedBlockingQueue<>();
     private volatile boolean isPushingVideos = false;
     private Thread videoPushThread = null;
     private volatile long lastPushTime = 0;
     private static final long MIN_PUSH_INTERVAL_MS = 2000;
-    
+
     private final AtomicBoolean idleVideoGenerationComplete = new AtomicBoolean(false);
     private String currentFinalVideoPath = null;
 
-    public ChatService(VolcengineClient volcengineClient, 
+    // HLS 相关
+    private volatile boolean useHls = true; // 默认启用 HLS
+    private String currentHlsSessionId = null;
+
+    public ChatService(VolcengineClient volcengineClient,
                        PythonServiceClient pythonServiceClient,
                        ChatWebSocketHandler webSocketHandler,
                        FlashHeadProperties properties,
-                       VideoStreamService videoStreamService) {
+                       VideoStreamService videoStreamService,
+                       HlsStreamService hlsStreamService) {
         this.volcengineClient = volcengineClient;
         this.pythonServiceClient = pythonServiceClient;
         this.webSocketHandler = webSocketHandler;
         this.properties = properties;
         this.videoStreamService = videoStreamService;
+        this.hlsStreamService = hlsStreamService;
     }
     
     public String getCurrentFinalVideoPath() {
@@ -83,12 +90,19 @@ public class ChatService {
         this.currentModelType = modelType != null ? modelType : "lite";
         this.currentSeed = seed;
         this.currentUseFaceCrop = useFaceCrop;
-        
+
         pendingVideoQueue.clear();
         sessionVideoSegments.clear();
         hasReceivedFirstReply.set(false);
         idleVideoGenerationComplete.set(false);
-        
+
+        // 生成新的 HLS 会话 ID
+        if (useHls) {
+            currentHlsSessionId = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
+            hlsStreamService.createSession(currentHlsSessionId);
+            log.info("创建 HLS 会话: {}", currentHlsSessionId);
+        }
+
         startVideoPushThread();
         startIdleVideoGeneration();
     }
@@ -310,40 +324,72 @@ public class ChatService {
             log.warn("Session {} is already processing", sessionId);
             return;
         }
-        
+
         processingSessions.put(sessionId, true);
         hasPendingReply.set(true);
         hasReceivedFirstReply.set(false); // 重置，等待新的回复视频
-        
+
         new Thread(() -> {
             try {
                 log.info("Processing chat message for session: {}", sessionId);
-                
+
                 String assistantMessage = volcengineClient.getChatResponse(
                     userMessage, chatHistory
                 );
-                
+
                 ChatMessage message = new ChatMessage();
                 message.setUser(userMessage);
                 message.setAssistant(assistantMessage);
                 chatHistory.add(message);
-                
+
                 Map<String, Object> chatMsg = new HashMap<>();
                 chatMsg.put("type", "chat");
                 chatMsg.put("data", message);
                 webSocketHandler.broadcastMessage(chatMsg);
-                
+
                 File audioFile = pythonServiceClient.textToSpeech(assistantMessage);
                 currentAudioFile = audioFile;
-                
+
                 String streamId = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
-                
-                pythonServiceClient.setCallbackUrl("http://localhost:8080/api/callback/new-segment");
-                pythonServiceClient.generateVideoStreamingWithCallback(
-                    audioFile, currentCondImage, currentCkptDir, currentWav2vecDir,
-                    currentModelType, currentSeed, currentUseFaceCrop, streamId
-                );
-                
+
+                if (useHls) {
+                    // 使用 HLS 流式生成
+                    log.info("使用 HLS 流式生成视频, streamId: {}", streamId);
+
+                    // 预创建 HLS 会话，这样前端请求时会话已经存在
+                    hlsStreamService.createSession(streamId);
+                    log.info("预创建 HLS 会话: {}", streamId);
+
+                    // 生成后端 URL（用于 Python 服务回调）
+                    String backendUrl = "http://localhost:8080";
+
+                    // 先推送 HLS 流地址到前端
+                    String hlsUrl = backendUrl + "/api/hls/" + streamId + "/playlist.m3u8";
+                    log.info("HLS 流地址: {}", hlsUrl);
+
+                    Map<String, Object> hlsMsg = new HashMap<>();
+                    hlsMsg.put("type", "hls_stream");
+                    hlsMsg.put("hls_url", hlsUrl);
+                    hlsMsg.put("stream_id", streamId);
+                    webSocketHandler.broadcastMessage(hlsMsg);
+
+                    // 然后调用 Python 服务生成视频（异步）
+                    Map<String, Object> result = pythonServiceClient.generateVideoHls(
+                        audioFile, currentCondImage, currentCkptDir, currentWav2vecDir,
+                        currentModelType, currentSeed, currentUseFaceCrop, streamId, backendUrl
+                    );
+
+                    log.info("Python HLS 生成启动结果: {}", result);
+
+                } else {
+                    // 使用原有分段 MP4 方式
+                    pythonServiceClient.setCallbackUrl("http://localhost:8080/api/callback/new-segment");
+                    pythonServiceClient.generateVideoStreamingWithCallback(
+                        audioFile, currentCondImage, currentCkptDir, currentWav2vecDir,
+                        currentModelType, currentSeed, currentUseFaceCrop, streamId
+                    );
+                }
+
             } catch (Exception e) {
                 log.error("Error processing chat message", e);
                 Map<String, Object> errorMsg = new HashMap<>();

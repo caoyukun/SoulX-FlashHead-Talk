@@ -237,4 +237,77 @@ public class PythonServiceClient {
             }
         }
     }
+
+    /**
+     * HLS 流式生成视频
+     */
+    public Map<String, Object> generateVideoHls(File audioFile, String condImage,
+                                                 String ckptDir, String wav2vecDir,
+                                                 String modelType, int seed, boolean useFaceCrop,
+                                                 String streamId, String backendUrl) throws IOException {
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("audio_path", audioFile.getAbsolutePath());
+        requestBody.put("cond_image", condImage);
+        requestBody.put("ckpt_dir", ckptDir);
+        requestBody.put("wav2vec_dir", wav2vecDir);
+        requestBody.put("model_type", modelType);
+        requestBody.put("seed", seed);
+        requestBody.put("use_face_crop", useFaceCrop);
+        requestBody.put("stream_id", streamId);
+        requestBody.put("backend_url", backendUrl);
+
+        String jsonBody = objectMapper.writeValueAsString(requestBody);
+
+        Request request = new Request.Builder()
+                .url(properties.getPythonService().getUrl() + "/generate-video-hls")
+                .post(RequestBody.create(jsonBody, MediaType.parse("application/json")))
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                String errorBody = response.body() != null ? response.body().string() : "Unknown error";
+                log.error("HLS video generation failed: {}", errorBody);
+                throw new IOException("HLS video generation failed: " + response.code());
+            }
+
+            String responseBody = response.body().string();
+            return objectMapper.readValue(responseBody, Map.class);
+        }
+    }
+
+    /**
+     * HLS 流式生成空闲视频
+     */
+    public Map<String, Object> generateIdleVideoHls(String condImage, String ckptDir, String wav2vecDir,
+                                                     String modelType, int seed, boolean useFaceCrop,
+                                                     double duration, String streamId, String backendUrl) throws IOException {
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("duration", duration);
+        requestBody.put("cond_image", condImage);
+        requestBody.put("ckpt_dir", ckptDir);
+        requestBody.put("wav2vec_dir", wav2vecDir);
+        requestBody.put("model_type", modelType);
+        requestBody.put("seed", seed);
+        requestBody.put("use_face_crop", useFaceCrop);
+        requestBody.put("stream_id", streamId);
+        requestBody.put("backend_url", backendUrl);
+
+        String jsonBody = objectMapper.writeValueAsString(requestBody);
+
+        Request request = new Request.Builder()
+                .url(properties.getPythonService().getUrl() + "/generate-idle-video-hls")
+                .post(RequestBody.create(jsonBody, MediaType.parse("application/json")))
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                String errorBody = response.body() != null ? response.body().string() : "Unknown error";
+                log.error("HLS idle video generation failed: {}", errorBody);
+                throw new IOException("HLS idle video generation failed: " + response.code());
+            }
+
+            String responseBody = response.body().string();
+            return objectMapper.readValue(responseBody, Map.class);
+        }
+    }
 }

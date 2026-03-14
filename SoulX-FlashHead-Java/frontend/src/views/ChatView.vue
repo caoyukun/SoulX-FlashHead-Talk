@@ -3,10 +3,29 @@
     <!-- 左侧/中间：1:1 视频区域 -->
     <div class="video-panel" :class="{ 'centered': !showChatPanel }">
       <div class="video-wrapper" @click="toggleControls">
+        <!-- HLS 播放器 -->
+        <video
+          ref="hlsVideoPlayer"
+          class="digital-human-video hls-player"
+          :class="{ active: useHls }"
+          playsinline
+          preload="auto"
+          :loop="false"
+          @timeupdate="handleHlsTimeUpdate"
+          @loadedmetadata="handleHlsMetadataLoaded"
+          @waiting="handleHlsWaiting"
+          @playing="handleHlsPlaying"
+          @error="handleHlsError"
+          @volumechange="handleVolumeChange"
+        >
+          您的浏览器不支持视频播放。
+        </video>
+
+        <!-- 原有分段 MP4 播放器（作为 fallback） -->
         <video
           ref="videoPlayer1"
           class="digital-human-video"
-          :class="{ active: currentPlayerIndex === 0 }"
+          :class="{ active: !useHls && currentPlayerIndex === 0 }"
           playsinline
           preload="auto"
           :loop="false"
@@ -19,11 +38,11 @@
         >
           您的浏览器不支持视频播放。
         </video>
-        
+
         <video
           ref="videoPlayer2"
           class="digital-human-video"
-          :class="{ active: currentPlayerIndex === 1 }"
+          :class="{ active: !useHls && currentPlayerIndex === 1 }"
           playsinline
           preload="auto"
           :loop="false"
@@ -286,12 +305,21 @@ import { ref, reactive, computed, onMounted, nextTick, onUnmounted, watch } from
 import { ElMessage } from 'element-plus'
 import { useChatStore } from '../store/chat'
 import { chatApi, videoApi } from '../api'
+import { hlsApi } from '../api/hls'
+import Hls from 'hls.js'
 
 // 视频播放器
+const hlsVideoPlayer = ref(null)
 const videoPlayer1 = ref(null)
 const videoPlayer2 = ref(null)
 const chatMessages = ref(null)
 const customControls = ref(null)
+
+// HLS 相关
+let hls = null
+const useHls = ref(false)
+const currentHlsUrl = ref(null)
+const isHlsBuffering = ref(false)
 
 // 状态
 const inputMessage = ref('')
@@ -490,6 +518,7 @@ const switchToNextVideo = () => {
   const nextPlayer = videoPlayers.value[nextPlayerIndex]
   const prevPlayer = videoPlayers.value[prevPlayerIndex]
   
+  // 先播放下一个视频（静音）
   if (nextPlayer?.value) {
     nextPlayer.value.currentTime = 0
     nextPlayer.value.muted = isMuted.value
@@ -497,17 +526,19 @@ const switchToNextVideo = () => {
     nextPlayer.value.play().catch(() => {})
   }
   
+  // 立即更新索引
   currentSegmentIndex.value = nextIndex
   currentPlayerIndex.value = nextPlayerIndex
   isWaitingForNewVideo.value = false
   
-  setTimeout(() => {
-    if (prevPlayer?.value) {
-      prevPlayer.value.pause()
-      prevPlayer.value.muted = true
-    }
-  }, 150)
+  // 立即暂停上一个视频
+  if (prevPlayer?.value) {
+    prevPlayer.value.pause()
+    prevPlayer.value.muted = true
+    prevPlayer.value.currentTime = 0
+  }
   
+  // 预加载下下个视频
   const preloadIndex = nextIndex + 1
   if (preloadIndex < videoSegments.value.length) {
     preloadVideoToPlayer(preloadIndex, 1 - nextPlayerIndex)
@@ -524,25 +555,39 @@ const playSegment = (index) => {
   videoReadyState[0] = false
   videoReadyState[1] = false
   
+  // 先暂停所有播放器
   for (let i = 0; i < videoPlayers.value.length; i++) {
     const p = videoPlayers.value[i]
     if (p?.value) {
       p.value.pause()
       p.value.muted = true
+      p.value.currentTime = 0
     }
   }
   
+  // 预加载下一个视频
   if (index + 1 < videoSegments.value.length) {
     preloadVideoToPlayer(index + 1, 1 - currentPlayerIndex.value)
   }
   
+  // 加载并播放当前视频
   const player = currentVideoPlayer.value
   if (player?.value) {
     player.value.src = segment.url
     player.value.muted = isMuted.value
     player.value.volume = savedVolume.value
     player.value.load()
-    player.value.play().catch(() => { isPaused.value = true })
+    
+    // 等待 canplay 事件再播放，确保更流畅
+    const playWhenReady = () => {
+      if (hasUserInteracted.value || !isPaused.value) {
+        player.value.play().catch(() => {
+          isPaused.value = true
+        })
+      }
+      player.value.removeEventListener('canplay', playWhenReady)
+    }
+    player.value.addEventListener('canplay', playWhenReady)
   }
 }
 
@@ -625,17 +670,29 @@ const handleProgressClick = (event) => {
 
 // 切换播放/暂停
 const togglePlay = () => {
-  const player = currentVideoPlayer.value
-  if (!player?.value) return
-  
   hasUserInteracted.value = true
-  
-  if (isPaused.value) {
-    player.value.play().catch(() => {})
-    isPaused.value = false
+
+  if (useHls.value && hlsVideoPlayer.value) {
+    // HLS 播放器
+    if (isPaused.value) {
+      hlsVideoPlayer.value.play().catch(() => {})
+      isPaused.value = false
+    } else {
+      hlsVideoPlayer.value.pause()
+      isPaused.value = true
+    }
   } else {
-    player.value.pause()
-    isPaused.value = true
+    // 原有播放器
+    const player = currentVideoPlayer.value
+    if (!player?.value) return
+
+    if (isPaused.value) {
+      player.value.play().catch(() => {})
+      isPaused.value = false
+    } else {
+      player.value.pause()
+      isPaused.value = true
+    }
   }
 }
 
@@ -712,22 +769,31 @@ const handleVideoError = (playerIndex, e) => {
 }
 
 const handleVolumeChange = () => {
-  const player = currentVideoPlayer.value
-  if (player?.value) {
-    isMuted.value = player.value.muted
-    if (!isMuted.value) savedVolume.value = player.value.volume
-    const otherPlayer = videoPlayers.value[1 - currentPlayerIndex.value]
-    if (otherPlayer?.value) {
-      otherPlayer.value.muted = isMuted.value
-      otherPlayer.value.volume = savedVolume.value
+  if (useHls.value && hlsVideoPlayer.value) {
+    isMuted.value = hlsVideoPlayer.value.muted
+    if (!isMuted.value) savedVolume.value = hlsVideoPlayer.value.volume
+  } else {
+    const player = currentVideoPlayer.value
+    if (player?.value) {
+      isMuted.value = player.value.muted
+      if (!isMuted.value) savedVolume.value = player.value.volume
+      const otherPlayer = videoPlayers.value[1 - currentPlayerIndex.value]
+      if (otherPlayer?.value) {
+        otherPlayer.value.muted = isMuted.value
+        otherPlayer.value.volume = savedVolume.value
+      }
     }
   }
 }
 
 const toggleMute = () => {
-  const player = currentVideoPlayer.value
-  if (player?.value) {
-    player.value.muted = !player.value.muted
+  if (useHls.value && hlsVideoPlayer.value) {
+    hlsVideoPlayer.value.muted = !hlsVideoPlayer.value.muted
+  } else {
+    const player = currentVideoPlayer.value
+    if (player?.value) {
+      player.value.muted = !player.value.muted
+    }
   }
 }
 
@@ -759,14 +825,18 @@ const addVideoSegment = (path) => {
     tempVideo.load()
   }
   
+  // 第一个视频，开始播放
   if (currentSegmentIndex.value === -1 && videoSegments.value.length > 0) {
     isWaitingForNewVideo.value = false
     playSegment(0)
     isPaused.value = false
-  } else if (currentSegmentIndex.value + 1 === videoSegments.value.length - 1) {
+  }
+  // 预加载下一个视频
+  else if (currentSegmentIndex.value + 1 === videoSegments.value.length - 1) {
     preloadVideoToPlayer(videoSegments.value.length - 1, 1 - currentPlayerIndex.value)
   }
   
+  // 如果正在等待新视频，或者已暂停，恢复播放
   if (isWaitingForNewVideo.value || (isPaused.value && currentSegmentIndex.value >= 0)) {
     isWaitingForNewVideo.value = false
     isPaused.value = false
@@ -774,20 +844,23 @@ const addVideoSegment = (path) => {
     if (currentSegmentIndex.value >= 0) {
       const player = currentVideoPlayer.value
       if (player?.value) {
+        // 播放倒数第二个视频时，立即预加载下一个并切换
         if (currentSegmentIndex.value === videoSegments.value.length - 2) {
           preloadVideoToPlayer(videoSegments.value.length - 1, 1 - currentPlayerIndex.value)
+          // 检查是否准备好，如果准备好了就立即切换
           const checkReady = setInterval(() => {
             if (videoReadyState[1 - currentPlayerIndex.value]) {
               clearInterval(checkReady)
               switchToNextVideo()
             }
-          }, 100)
+          }, 50) // 更短的检查间隔，更快切换
+          // 1秒后无论如何尝试切换
           setTimeout(() => {
             clearInterval(checkReady)
-            if (currentSegmentIndex.value < videoSegments.value.length - 1) {
+            if (currentSegmentIndex.value < videoSegments.value.length - 1 && videoReadyState[1 - currentPlayerIndex.value]) {
               switchToNextVideo()
             }
-          }, 1000)
+          }, 500) // 缩短超时时间，更快切换
         } else if (player.value.paused) {
           player.value.play().catch(() => {})
         }
@@ -829,9 +902,7 @@ const connectWebSocket = () => {
 
 const handleWebSocketMessage = (data) => {
   if (data.type === 'chat') {
-    // 添加用户消息
-    addMessage('user', data.data.user)
-    // 添加助手回复
+    // 只添加助手回复，用户消息已经在 sendMessage 中立即显示了
     addMessage('assistant', data.data.assistant)
     // 同步到 store
     chatStore.addMessage(data.data.user, data.data.assistant)
@@ -840,6 +911,213 @@ const handleWebSocketMessage = (data) => {
     addMessage('system', '错误: ' + data.message)
   } else if (data.type === 'video_segment') {
     if (data.path) addVideoSegment(data.path)
+  } else if (data.type === 'hls_stream') {
+    // HLS 流地址推送
+    if (data.hls_url) {
+      initHlsPlayer(data.hls_url)
+    }
+  }
+}
+
+// ==================== HLS 播放器相关函数 ====================
+
+const initHlsPlayer = async (hlsUrl) => {
+  if (!hlsUrl) return
+
+  // 等待下一个 tick，确保 DOM 已更新
+  await nextTick()
+
+  // 检查视频元素是否可用
+  if (!hlsVideoPlayer.value) {
+    console.error('HLS video player element not found')
+    return
+  }
+
+  currentHlsUrl.value = hlsUrl
+  useHls.value = true
+
+  // 停止原有播放器
+  stopLegacyPlayers()
+
+  // 初始化 HLS
+  if (Hls.isSupported()) {
+    // 销毁旧的 HLS 实例
+    if (hls) {
+      hls.destroy()
+      hls = null
+    }
+
+    // 重置视频元素
+    hlsVideoPlayer.value.pause()
+    hlsVideoPlayer.value.removeAttribute('src')
+    hlsVideoPlayer.value.load()
+
+    hls = new Hls({
+      enableWorker: true,
+      lowLatencyMode: true,
+      backBufferLength: 90,
+      maxBufferLength: 30,
+      maxMaxBufferLength: 60,
+      liveSyncDurationCount: 3,
+      liveMaxLatencyDurationCount: 10,
+      fragLoadingTimeOut: 20000,
+      manifestLoadingTimeOut: 10000,
+      levelLoadingTimeOut: 10000,
+      // 添加更多调试信息
+      debug: false
+    })
+
+    hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+      console.log('HLS: Media attached')
+    })
+
+    hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+      console.log('HLS: Manifest parsed, levels:', data.levels.length)
+      // 自动播放
+      if (hlsVideoPlayer.value) {
+        hlsVideoPlayer.value.play().catch(e => {
+          console.log('HLS autoplay prevented:', e)
+          isPaused.value = true
+        })
+      }
+    })
+
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      console.error('HLS Error:', data)
+      if (data.fatal) {
+        switch (data.type) {
+          case Hls.ErrorTypes.NETWORK_ERROR:
+            console.log('HLS: Fatal network error, trying to recover')
+            hls.startLoad()
+            break
+          case Hls.ErrorTypes.MEDIA_ERROR:
+            console.log('HLS: Fatal media error, trying to recover')
+            hls.recoverMediaError()
+            break
+          default:
+            console.log('HLS: Fatal error, destroying')
+            destroyHlsPlayer()
+            // 回退到原有播放器
+            useHls.value = false
+            ElMessage.warning('HLS 播放失败，回退到原有播放器')
+            break
+        }
+      }
+    })
+
+    hls.on(Hls.Events.BUFFER_APPENDING, () => {
+      isHlsBuffering.value = true
+    })
+
+    hls.on(Hls.Events.BUFFER_APPENDED, () => {
+      isHlsBuffering.value = false
+    })
+
+    // 先 attachMedia 再 loadSource
+    hls.attachMedia(hlsVideoPlayer.value)
+    hls.loadSource(hlsUrl)
+
+  } else if (hlsVideoPlayer.value.canPlayType('application/vnd.apple.mpegurl')) {
+    // Safari 原生支持 HLS
+    console.log('Using native HLS support')
+    hlsVideoPlayer.value.src = hlsUrl
+    hlsVideoPlayer.value.addEventListener('loadedmetadata', () => {
+      hlsVideoPlayer.value.play().catch(e => {
+        console.log('Native HLS autoplay prevented:', e)
+        isPaused.value = true
+      })
+    })
+  } else {
+    console.error('HLS not supported')
+    ElMessage.error('您的浏览器不支持 HLS 播放')
+    useHls.value = false
+  }
+}
+
+const stopLegacyPlayers = () => {
+  // 停止原有播放器
+  if (videoPlayer1.value) {
+    videoPlayer1.value.pause()
+    videoPlayer1.value.src = ''
+  }
+  if (videoPlayer2.value) {
+    videoPlayer2.value.pause()
+    videoPlayer2.value.src = ''
+  }
+  // 重置状态
+  videoSegments.value = []
+  currentSegmentIndex.value = -1
+}
+
+const destroyHlsPlayer = () => {
+  if (hls) {
+    try {
+      hls.destroy()
+    } catch (e) {
+      console.log('HLS destroy error:', e)
+    }
+    hls = null
+  }
+  if (hlsVideoPlayer.value) {
+    try {
+      hlsVideoPlayer.value.pause()
+      hlsVideoPlayer.value.removeAttribute('src')
+      hlsVideoPlayer.value.load()
+    } catch (e) {
+      console.log('Video element cleanup error:', e)
+    }
+  }
+  useHls.value = false
+  currentHlsUrl.value = null
+}
+
+const handleHlsTimeUpdate = () => {
+  if (hlsVideoPlayer.value) {
+    currentGlobalTime.value = hlsVideoPlayer.value.currentTime
+  }
+}
+
+const handleHlsMetadataLoaded = () => {
+  if (hlsVideoPlayer.value) {
+    totalDuration.value = hlsVideoPlayer.value.duration || 0
+  }
+}
+
+const handleHlsWaiting = () => {
+  isHlsBuffering.value = true
+}
+
+const handleHlsPlaying = () => {
+  isHlsBuffering.value = false
+  isPaused.value = false
+}
+
+const handleHlsError = (e) => {
+  // 忽略某些非致命错误
+  const video = e.target
+  if (video && video.error) {
+    const errorCode = video.error.code
+    const errorMessage = video.error.message
+    console.error('HLS Video Error - Code:', errorCode, 'Message:', errorMessage)
+
+    // MEDIA_ERR_SRC_NOT_SUPPORTED (4) 或 MEDIA_ERR_NETWORK (2) 才需要处理
+    if (errorCode === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ||
+        errorCode === MediaError.MEDIA_ERR_NETWORK) {
+      ElMessage.error('HLS 播放出错，尝试回退到原有播放器')
+      destroyHlsPlayer()
+      useHls.value = false
+    } else if (errorCode === MediaError.MEDIA_ERR_ABORTED) {
+      // 用户中止或切换源，忽略
+      console.log('HLS: Playback aborted (possibly source switch)')
+    } else {
+      // 其他错误，尝试恢复
+      console.log('HLS: Trying to recover from error')
+      if (hls) {
+        hls.recoverMediaError()
+      }
+    }
+  } else {
+    console.error('HLS Video Error:', e)
   }
 }
 
@@ -870,6 +1148,8 @@ const initializeModel = async () => {
     videoReadyState[0] = false
     videoReadyState[1] = false
     currentFinalVideoPath.value = null
+    // 销毁 HLS 播放器
+    destroyHlsPlayer()
     ElMessage.success('模型初始化成功')
     showSettings.value = false
   } catch (error) {
@@ -938,6 +1218,8 @@ onMounted(() => {
 onUnmounted(() => {
   if (ws) ws.close()
   if (recordingTimer) clearInterval(recordingTimer)
+  // 销毁 HLS 播放器
+  destroyHlsPlayer()
 })
 </script>
 
@@ -1005,6 +1287,15 @@ onUnmounted(() => {
 .digital-human-video.active {
   opacity: 1;
   z-index: 2;
+}
+
+/* HLS 播放器样式 */
+.digital-human-video.hls-player {
+  z-index: 3;
+}
+
+.digital-human-video.hls-player.active {
+  z-index: 4;
 }
 
 /* 视频控制覆盖层 */
