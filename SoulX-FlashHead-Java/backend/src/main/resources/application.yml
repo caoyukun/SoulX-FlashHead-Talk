@@ -10,6 +10,7 @@ flashhead:
     url: http://localhost:5000
   volcengine:
     api-url: https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions
+    api-key: 651b4793-5c37-483d-ac79-99d59ea452bf
   video:
     storage-path: ./chat_results
 

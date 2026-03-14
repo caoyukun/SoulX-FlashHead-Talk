@@ -94,6 +94,71 @@ public class PythonServiceClient {
         }
     }
 
+    public void setCallbackUrl(String callbackUrl) throws IOException {
+        Map<String, String> requestBody = new HashMap<>();
+        requestBody.put("url", callbackUrl);
+
+        String jsonBody = objectMapper.writeValueAsString(requestBody);
+
+        Request request = new Request.Builder()
+                .url(properties.getPythonService().getUrl() + "/set-callback")
+                .post(RequestBody.create(jsonBody, MediaType.parse("application/json")))
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                String errorBody = response.body() != null ? response.body().string() : "Unknown error";
+                log.error("Setting callback URL failed: {}", errorBody);
+                throw new IOException("Setting callback URL failed: " + response.code());
+            }
+            log.info("Callback URL set successfully: {}", callbackUrl);
+        }
+    }
+    
+    public void generateVideoStreamingWithCallback(File audioFile, String condImage, 
+                                                   String ckptDir, String wav2vecDir, 
+                                                   String modelType, int seed, boolean useFaceCrop,
+                                                   String streamId) throws IOException {
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("audio_path", audioFile.getAbsolutePath());
+        requestBody.put("cond_image", condImage);
+        requestBody.put("ckpt_dir", ckptDir);
+        requestBody.put("wav2vec_dir", wav2vecDir);
+        requestBody.put("model_type", modelType);
+        requestBody.put("seed", seed);
+        requestBody.put("use_face_crop", useFaceCrop);
+        requestBody.put("stream_id", streamId);
+        requestBody.put("use_streaming_callback", true);
+
+        String jsonBody = objectMapper.writeValueAsString(requestBody);
+
+        Request request = new Request.Builder()
+                .url(properties.getPythonService().getUrl() + "/generate-video-streaming")
+                .post(RequestBody.create(jsonBody, MediaType.parse("application/json")))
+                .build();
+
+        httpClient.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                log.error("Video generation failed asynchronously", e);
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                try {
+                    if (!response.isSuccessful()) {
+                        String errorBody = response.body() != null ? response.body().string() : "Unknown error";
+                        log.error("Video generation failed: {}", errorBody);
+                    } else {
+                        log.info("Video generation completed successfully");
+                    }
+                } finally {
+                    response.close();
+                }
+            }
+        });
+    }
+    
     public Map<String, Object> generateVideoStreaming(File audioFile, String condImage, 
                                                        String ckptDir, String wav2vecDir, 
                                                        String modelType, int seed, boolean useFaceCrop,

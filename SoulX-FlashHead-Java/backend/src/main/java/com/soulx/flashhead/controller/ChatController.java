@@ -28,11 +28,9 @@ public class ChatController {
         return chatService.getChatHistory();
     }
 
-    @GetMapping("/current-video")
-    public Map<String, String> getCurrentVideo() {
-        Map<String, String> result = new HashMap<>();
-        result.put("path", chatService.getCurrentVideoPath());
-        return result;
+    @GetMapping("/video-segments")
+    public List<String> getVideoSegments() {
+        return chatService.getSessionVideoSegments();
     }
 
     @PostMapping("/send")
@@ -41,13 +39,6 @@ public class ChatController {
         
         chatService.processChatMessage(
             request.getMessage(),
-            request.getApiKey(),
-            request.getCondImage() != null ? request.getCondImage() : "examples/girl.png",
-            request.getCkptDir() != null ? request.getCkptDir() : "models/SoulX-FlashHead-1_3B",
-            request.getWav2vecDir() != null ? request.getWav2vecDir() : "models/wav2vec2-base-960h",
-            request.getModelType() != null ? request.getModelType() : "lite",
-            request.getSeed() != null ? request.getSeed() : 9999,
-            request.getUseFaceCrop() != null ? request.getUseFaceCrop() : false,
             sessionId
         );
         
@@ -70,26 +61,6 @@ public class ChatController {
         
         Map<String, String> result = new HashMap<>();
         result.put("status", "initialized");
-        return result;
-    }
-
-    @PostMapping("/idle-video")
-    public Map<String, String> generateIdleVideo(@RequestBody ChatRequest request) {
-        String sessionId = UUID.randomUUID().toString();
-        
-        chatService.generateIdleVideo(
-            request.getCondImage() != null ? request.getCondImage() : "examples/girl.png",
-            request.getCkptDir() != null ? request.getCkptDir() : "models/SoulX-FlashHead-1_3B",
-            request.getWav2vecDir() != null ? request.getWav2vecDir() : "models/wav2vec2-base-960h",
-            request.getModelType() != null ? request.getModelType() : "lite",
-            request.getSeed() != null ? request.getSeed() : 9999,
-            request.getUseFaceCrop() != null ? request.getUseFaceCrop() : false,
-            sessionId
-        );
-        
-        Map<String, String> result = new HashMap<>();
-        result.put("sessionId", sessionId);
-        result.put("status", "generating");
         return result;
     }
 }

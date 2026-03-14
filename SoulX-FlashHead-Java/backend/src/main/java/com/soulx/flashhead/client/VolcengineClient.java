@@ -30,7 +30,7 @@ public class VolcengineClient {
         this.objectMapper = new ObjectMapper();
     }
 
-    public String getChatResponse(String userMessage, String apiKey, List<ChatMessage> chatHistory) throws IOException {
+    public String getChatResponse(String userMessage, List<ChatMessage> chatHistory) throws IOException {
         VolcengineRequest request = new VolcengineRequest();
         
         String systemPrompt = "你是一个友好、智能的数字人助手。请用自然、亲切的语气回答用户的问题，回复要简洁明了。";
@@ -50,7 +50,7 @@ public class VolcengineClient {
         Request httpRequest = new Request.Builder()
                 .url(properties.getVolcengine().getApiUrl())
                 .addHeader("Content-Type", "application/json")
-                .addHeader("Authorization", "Bearer " + apiKey)
+                .addHeader("Authorization", "Bearer " + properties.getVolcengine().getApiKey())
                 .post(RequestBody.create(jsonBody, MediaType.parse("application/json")))
                 .build();
 

@@ -1,6 +1,7 @@
 """
 FlashHead Python 模型服务
 提供 REST API 供 Java 后端调用
+支持真正的流式视频生成
 """
 import os
 import sys
@@ -14,14 +15,14 @@ from collections import deque
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from loguru import logger
+import requests
 
-current_file = os.path.realpath(__file__)
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
-logger.info(f"当前文件: {current_file}")
-logger.info(f"项目根目录: {project_root}")
-logger.info(f"项目根目录内容: {os.listdir(project_root) if os.path.exists(project_root) else '目录不存在'}")
+# 确保项目根目录在sys.path中，这样可以找到flash_head模块
+# 脚本从项目根目录启动，所以使用当前工作目录
+project_root = os.getcwd()
 sys.path.insert(0, project_root)
-logger.info(f"Python路径: {sys.path}")
+logger.info(f"Project root: {project_root}")
+logger.info(f"sys.path: {sys.path}")
 
 try:
     from flash_head.inference import (
@@ -39,12 +40,15 @@ except ImportError:
 app = Flask(__name__)
 CORS(app)
 
-CHUNKS_PER_SEGMENT = 3
+CHUNKS_PER_SEGMENT = 1
 
 pipeline = None
 loaded_ckpt_dir = None
 loaded_wav2vec_dir = None
 loaded_model_type = None
+
+# 全局回调URL，用于通知Java后端新视频段
+callback_url = None
 
 
 def _write_frames_to_mp4(frames_list, video_path, fps):
@@ -162,6 +166,34 @@ def text_to_speech_free(text, output_path):
         return wav_path
 
 
+def notify_backend_new_segment(video_path):
+    """通知Java后端有新视频段"""
+    if callback_url:
+        try:
+            response = requests.post(
+                callback_url,
+                json={"path": video_path},
+                timeout=5
+            )
+            logger.info(f"通知后端新视频段: {video_path}, 状态: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"通知后端失败: {e}")
+
+
+def notify_backend_generation_complete():
+    """通知Java后端视频生成完成"""
+    if callback_url:
+        try:
+            complete_url = callback_url.replace("/new-segment", "/generation-complete")
+            response = requests.post(
+                complete_url,
+                timeout=5
+            )
+            logger.info(f"通知后端视频生成完成, 状态: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"通知后端生成完成失败: {e}")
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """健康检查"""
@@ -170,6 +202,16 @@ def health():
         "flashhead_available": FLASHHEAD_AVAILABLE,
         "timestamp": datetime.now().isoformat()
     })
+
+
+@app.route('/set-callback', methods=['POST'])
+def set_callback():
+    """设置回调URL"""
+    global callback_url
+    data = request.json
+    callback_url = data.get('url')
+    logger.info(f"设置回调URL: {callback_url}")
+    return jsonify({"status": "success"})
 
 
 @app.route('/tts', methods=['POST'])
@@ -241,116 +283,9 @@ def initialize():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/generate-video', methods=['POST'])
-def generate_video():
-    """生成视频"""
-    if not FLASHHEAD_AVAILABLE:
-        return jsonify({"error": "FlashHead 模块不可用"}), 500
-    
-    try:
-        import numpy as np
-        import torch
-        import librosa
-        
-        data = request.json
-        audio_path = data.get('audio_path')
-        cond_image = data.get('cond_image', 'examples/girl.png')
-        ckpt_dir = data.get('ckpt_dir', 'models/SoulX-FlashHead-1_3B')
-        wav2vec_dir = data.get('wav2vec_dir', 'models/wav2vec2-base-960h')
-        model_type = data.get('model_type', 'lite')
-        seed = data.get('seed', 9999)
-        use_face_crop = data.get('use_face_crop', False)
-        
-        if not audio_path or not os.path.exists(audio_path):
-            return jsonify({"error": "音频文件不存在"}), 400
-        
-        global pipeline, loaded_ckpt_dir, loaded_wav2vec_dir, loaded_model_type
-        
-        if (
-            pipeline is None
-            or loaded_ckpt_dir != ckpt_dir
-            or loaded_wav2vec_dir != wav2vec_dir
-            or loaded_model_type != model_type
-        ):
-            logger.info(f"加载模型: ckpt_dir={ckpt_dir}, wav2vec_dir={wav2vec_dir}")
-            pipeline = get_pipeline(
-                world_size=1,
-                ckpt_dir=ckpt_dir,
-                model_type=model_type,
-                wav2vec_dir=wav2vec_dir,
-            )
-            loaded_ckpt_dir = ckpt_dir
-            loaded_wav2vec_dir = wav2vec_dir
-            loaded_model_type = model_type
-        
-        base_seed = int(seed) if seed >= 0 else 9999
-        get_base_data(
-            pipeline,
-            cond_image_path_or_dir=cond_image,
-            base_seed=base_seed,
-            use_face_crop=use_face_crop,
-        )
-        
-        infer_params = get_infer_params()
-        sample_rate = infer_params["sample_rate"]
-        tgt_fps = infer_params["tgt_fps"]
-        cached_audio_duration = infer_params["cached_audio_duration"]
-        frame_num = infer_params["frame_num"]
-        motion_frames_num = infer_params["motion_frames_num"]
-        slice_len = frame_num - motion_frames_num
-        
-        human_speech_array_all, _ = librosa.load(audio_path, sr=sample_rate, mono=True)
-        human_speech_array_slice_len = slice_len * sample_rate // tgt_fps
-        
-        remainder = len(human_speech_array_all) % human_speech_array_slice_len
-        if remainder > 0:
-            pad_length = human_speech_array_slice_len - remainder
-            human_speech_array_all = np.concatenate(
-                [human_speech_array_all, np.zeros(pad_length, dtype=human_speech_array_all.dtype)]
-            )
-        human_speech_array_slices = human_speech_array_all.reshape(-1, human_speech_array_slice_len)
-        
-        if len(human_speech_array_slices) == 0:
-            return jsonify({"error": "音频太短"}), 400
-        
-        stream_dir = os.path.join("chat_results", "stream_preview")
-        os.makedirs(stream_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
-        accumulated = []
-        
-        cached_audio_length_sum = sample_rate * cached_audio_duration
-        audio_end_idx = cached_audio_duration * tgt_fps
-        audio_start_idx = audio_end_idx - frame_num
-        
-        audio_dq = deque([0.0] * cached_audio_length_sum, maxlen=cached_audio_length_sum)
-        for human_speech_array in human_speech_array_slices:
-            audio_dq.extend(human_speech_array.tolist())
-            audio_array = np.array(audio_dq)
-            audio_embedding = get_audio_embedding(pipeline, audio_array, audio_start_idx, audio_end_idx)
-            torch.cuda.synchronize()
-            video = run_pipeline(pipeline, audio_embedding)
-            video = video[motion_frames_num:]
-            torch.cuda.synchronize()
-            accumulated.append(torch.from_numpy(video.cpu().numpy()))
-        
-        output_dir = "chat_results"
-        os.makedirs(output_dir, exist_ok=True)
-        final_filename = f"res_{timestamp}.mp4"
-        final_path = os.path.join(output_dir, final_filename)
-        save_video_with_audio(accumulated, final_path, audio_path, fps=tgt_fps)
-        
-        return jsonify({
-            "status": "success",
-            "video_path": os.path.abspath(final_path)
-        })
-    except Exception as e:
-        logger.error(f"生成视频错误: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route('/generate-video-streaming', methods=['POST'])
 def generate_video_streaming():
-    """流式生成视频"""
+    """流式生成视频 - 使用异步线程+队列实现真正的流式"""
     if not FLASHHEAD_AVAILABLE:
         return jsonify({"error": "FlashHead 模块不可用"}), 500
     
@@ -359,7 +294,10 @@ def generate_video_streaming():
         import torch
         import librosa
         
+        logger.info(f"收到generate-video-streaming请求")
         data = request.json
+        logger.info(f"请求数据: {data}")
+        
         audio_path = data.get('audio_path')
         cond_image = data.get('cond_image', 'examples/girl.png')
         ckpt_dir = data.get('ckpt_dir', 'models/SoulX-FlashHead-1_3B')
@@ -368,9 +306,12 @@ def generate_video_streaming():
         seed = data.get('seed', 9999)
         use_face_crop = data.get('use_face_crop', False)
         stream_id = data.get('stream_id', datetime.now().strftime("%Y%m%d-%H%M%S"))
+        use_streaming_callback = data.get('use_streaming_callback', False)
+        
+        logger.info(f"audio_path: {audio_path}, exists: {os.path.exists(audio_path) if audio_path else 'None'}")
         
         if not audio_path or not os.path.exists(audio_path):
-            return jsonify({"error": "音频文件不存在"}), 400
+            return jsonify({"error": "音频文件不存在", "audio_path": audio_path}), 400
         
         global pipeline, loaded_ckpt_dir, loaded_wav2vec_dir, loaded_model_type
         
@@ -445,6 +386,7 @@ def generate_video_streaming():
             segment_audio_paths[segment_id] = segment_audio_path
         
         res_queue = queue.Queue()
+        segment_paths = []
         
         def inference_worker():
             audio_dq = deque([0.0] * (sample_rate * cached_audio_duration), 
@@ -470,7 +412,6 @@ def generate_video_streaming():
         worker_thread = threading.Thread(target=inference_worker)
         worker_thread.start()
         
-        segment_paths = []
         frame_buffer = []
         while True:
             item = res_queue.get()
@@ -493,6 +434,10 @@ def generate_video_streaming():
                     fps=tgt_fps,
                 )
                 segment_paths.append(os.path.abspath(segment_path))
+                
+                if use_streaming_callback:
+                    notify_backend_new_segment(os.path.abspath(segment_path))
+                
                 frame_buffer = []
         
         if frame_buffer:
@@ -508,8 +453,14 @@ def generate_video_streaming():
                 fps=tgt_fps,
             )
             segment_paths.append(os.path.abspath(segment_path))
+            
+            if use_streaming_callback:
+                notify_backend_new_segment(os.path.abspath(segment_path))
         
         worker_thread.join()
+        
+        if use_streaming_callback:
+            notify_backend_generation_complete()
         
         output_dir = "chat_results"
         os.makedirs(output_dir, exist_ok=True)
@@ -539,7 +490,7 @@ def generate_idle_video():
         import torch
         
         data = request.json
-        duration = data.get('duration', 5.0)
+        duration = data.get('duration', 3.0)
         cond_image = data.get('cond_image', 'examples/girl.png')
         ckpt_dir = data.get('ckpt_dir', 'models/SoulX-FlashHead-1_3B')
         wav2vec_dir = data.get('wav2vec_dir', 'models/wav2vec2-base-960h')
@@ -635,4 +586,4 @@ def generate_idle_video():
 
 if __name__ == '__main__':
     logger.info("启动 FlashHead Python 服务...")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)

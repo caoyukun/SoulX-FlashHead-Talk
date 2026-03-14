@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Slf4j
 @Service
@@ -24,7 +25,18 @@ public class ChatService {
     
     private final List<ChatMessage> chatHistory = Collections.synchronizedList(new ArrayList<>());
     private final Map<String, Boolean> processingSessions = new ConcurrentHashMap<>();
-    private String currentVideoPath;
+    
+    private final List<String> sessionVideoSegments = Collections.synchronizedList(new ArrayList<>());
+    private final AtomicBoolean isGeneratingIdle = new AtomicBoolean(false);
+    private final AtomicBoolean hasPendingReply = new AtomicBoolean(false);
+    private Thread idleVideoThread = null;
+    private String currentCondImage;
+    private String currentCkptDir;
+    private String currentWav2vecDir;
+    private String currentModelType;
+    private int currentSeed;
+    private boolean currentUseFaceCrop;
+    private File currentAudioFile = null;
 
     public ChatService(VolcengineClient volcengineClient, 
                        PythonServiceClient pythonServiceClient,
@@ -40,26 +52,110 @@ public class ChatService {
         return new ArrayList<>(chatHistory);
     }
 
-    public String getCurrentVideoPath() {
-        return currentVideoPath;
+    public List<String> getSessionVideoSegments() {
+        return new ArrayList<>(sessionVideoSegments);
     }
 
-    public void processChatMessage(String userMessage, String apiKey, String condImage,
-                                    String ckptDir, String wav2vecDir, String modelType,
-                                    int seed, boolean useFaceCrop, String sessionId) {
+    public void initializeVideoStream(String condImage, String ckptDir, String wav2vecDir,
+                                       String modelType, int seed, boolean useFaceCrop) {
+        this.currentCondImage = condImage != null ? condImage : "examples/girl.png";
+        this.currentCkptDir = ckptDir != null ? ckptDir : "models/SoulX-FlashHead-1_3B";
+        this.currentWav2vecDir = wav2vecDir != null ? wav2vecDir : "models/wav2vec2-base-960h";
+        this.currentModelType = modelType != null ? modelType : "lite";
+        this.currentSeed = seed;
+        this.currentUseFaceCrop = useFaceCrop;
+        
+        sessionVideoSegments.clear();
+        startIdleVideoGeneration();
+    }
+
+    private void startIdleVideoGeneration() {
+        if (idleVideoThread != null && idleVideoThread.isAlive()) {
+            return;
+        }
+        
+        idleVideoThread = new Thread(() -> {
+            log.info("开始持续生成空闲视频");
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    if (hasPendingReply.get()) {
+                        Thread.sleep(100);
+                        continue;
+                    }
+                    
+                    if (isGeneratingIdle.compareAndSet(false, true)) {
+                        try {
+                            String idleVideoPath = pythonServiceClient.generateIdleVideo(
+                                currentCondImage, currentCkptDir, currentWav2vecDir,
+                                currentModelType, currentSeed, currentUseFaceCrop, 3.0
+                            );
+                            
+                            sessionVideoSegments.add(idleVideoPath);
+                            log.info("添加空闲视频片段: {}", idleVideoPath);
+                            
+                            Map<String, Object> videoMsg = new HashMap<>();
+                            videoMsg.put("type", "video_segment");
+                            videoMsg.put("path", idleVideoPath);
+                            webSocketHandler.broadcastMessage(videoMsg);
+                        } finally {
+                            isGeneratingIdle.set(false);
+                        }
+                    }
+                } catch (Exception e) {
+                    log.error("生成空闲视频失败", e);
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+            log.info("停止生成空闲视频");
+        });
+        idleVideoThread.setDaemon(true);
+        idleVideoThread.start();
+    }
+
+    public void addVideoSegment(String videoPath) {
+        sessionVideoSegments.add(videoPath);
+        log.info("添加视频片段: {}", videoPath);
+    }
+    
+    private void cleanupAudioFile() {
+        if (currentAudioFile != null && currentAudioFile.exists()) {
+            try {
+                currentAudioFile.delete();
+                log.info("已删除临时音频文件: {}", currentAudioFile.getAbsolutePath());
+            } catch (Exception e) {
+                log.error("删除临时音频文件失败", e);
+            }
+            currentAudioFile = null;
+        }
+    }
+    
+    public void onVideoGenerationComplete() {
+        log.info("视频生成完成");
+        cleanupAudioFile();
+        hasPendingReply.set(false);
+        processingSessions.clear();
+    }
+    
+    public void processChatMessage(String userMessage, String sessionId) {
         if (processingSessions.getOrDefault(sessionId, false)) {
             log.warn("Session {} is already processing", sessionId);
             return;
         }
         
         processingSessions.put(sessionId, true);
+        hasPendingReply.set(true);
         
         new Thread(() -> {
             try {
                 log.info("Processing chat message for session: {}", sessionId);
                 
                 String assistantMessage = volcengineClient.getChatResponse(
-                    userMessage, apiKey, chatHistory
+                    userMessage, chatHistory
                 );
                 
                 ChatMessage message = new ChatMessage();
@@ -73,32 +169,15 @@ public class ChatService {
                 webSocketHandler.broadcastMessage(chatMsg);
                 
                 File audioFile = pythonServiceClient.textToSpeech(assistantMessage);
+                currentAudioFile = audioFile;
                 
                 String streamId = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
-                Map<String, Object> videoResult = pythonServiceClient.generateVideoStreaming(
-                    audioFile, condImage, ckptDir, wav2vecDir, modelType, seed, useFaceCrop, streamId
+                
+                pythonServiceClient.setCallbackUrl("http://localhost:8080/api/callback/new-segment");
+                pythonServiceClient.generateVideoStreamingWithCallback(
+                    audioFile, currentCondImage, currentCkptDir, currentWav2vecDir,
+                    currentModelType, currentSeed, currentUseFaceCrop, streamId
                 );
-                
-                @SuppressWarnings("unchecked")
-                List<String> segments = (List<String>) videoResult.get("segments");
-                String finalVideo = (String) videoResult.get("final_video");
-                
-                for (String segmentPath : segments) {
-                    currentVideoPath = segmentPath;
-                    Map<String, Object> videoMsg = new HashMap<>();
-                    videoMsg.put("type", "video_segment");
-                    videoMsg.put("path", segmentPath);
-                    webSocketHandler.broadcastMessage(videoMsg);
-                    Thread.sleep(100);
-                }
-                
-                currentVideoPath = finalVideo;
-                Map<String, Object> finalVideoMsg = new HashMap<>();
-                finalVideoMsg.put("type", "video_final");
-                finalVideoMsg.put("path", finalVideo);
-                webSocketHandler.broadcastMessage(finalVideoMsg);
-                
-                audioFile.delete();
                 
             } catch (Exception e) {
                 log.error("Error processing chat message", e);
@@ -106,27 +185,9 @@ public class ChatService {
                 errorMsg.put("type", "error");
                 errorMsg.put("message", e.getMessage());
                 webSocketHandler.broadcastMessage(errorMsg);
-            } finally {
+                cleanupAudioFile();
+                hasPendingReply.set(false);
                 processingSessions.remove(sessionId);
-            }
-        }).start();
-    }
-
-    public void generateIdleVideo(String condImage, String ckptDir, String wav2vecDir,
-                                   String modelType, int seed, boolean useFaceCrop,
-                                   String sessionId) {
-        new Thread(() -> {
-            try {
-                String idleVideoPath = pythonServiceClient.generateIdleVideo(
-                    condImage, ckptDir, wav2vecDir, modelType, seed, useFaceCrop, 5.0
-                );
-                currentVideoPath = idleVideoPath;
-                Map<String, Object> videoMsg = new HashMap<>();
-                videoMsg.put("type", "idle_video");
-                videoMsg.put("path", idleVideoPath);
-                webSocketHandler.broadcastMessage(videoMsg);
-            } catch (IOException e) {
-                log.error("Error generating idle video", e);
             }
         }).start();
     }
@@ -134,5 +195,12 @@ public class ChatService {
     public void initializeModel(String condImage, String ckptDir, String wav2vecDir,
                                  String modelType, int seed, boolean useFaceCrop) throws IOException {
         pythonServiceClient.initializeModel(condImage, ckptDir, wav2vecDir, modelType, seed, useFaceCrop);
+        initializeVideoStream(condImage, ckptDir, wav2vecDir, modelType, seed, useFaceCrop);
+    }
+    
+    public void stopIdleVideoGeneration() {
+        if (idleVideoThread != null) {
+            idleVideoThread.interrupt();
+        }
     }
 }

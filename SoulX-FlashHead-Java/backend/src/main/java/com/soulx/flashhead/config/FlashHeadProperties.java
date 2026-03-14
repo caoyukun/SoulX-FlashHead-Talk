@@ -20,6 +20,7 @@ public class FlashHeadProperties {
     @Data
     public static class Volcengine {
         private String apiUrl = "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions";
+        private String apiKey = "";
     }
 
     @Data

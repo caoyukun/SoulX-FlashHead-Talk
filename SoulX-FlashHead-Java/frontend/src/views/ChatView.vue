@@ -9,14 +9,6 @@
         </template>
         
         <el-form :model="settings" label-width="120px">
-          <el-form-item label="API Key">
-            <el-input
-              v-model="settings.apiKey"
-              type="password"
-              placeholder="请输入火山引擎 ARK API Key"
-            />
-          </el-form-item>
-          
           <el-form-item label="数字人照片">
             <el-input
               v-model="settings.condImage"
@@ -60,6 +52,10 @@
           <el-button type="primary" @click="initializeModel" :loading="isInitializing">
             初始化模型
           </el-button>
+          
+          <el-button type="success" @click="downloadCompleteVideo" :loading="isDownloading" style="margin-left: 10px;">
+            📥 下载完整视频
+          </el-button>
         </el-form>
       </el-card>
     </el-col>
@@ -79,7 +75,11 @@
             class="digital-human-video"
             controls
             autoplay
-            :key="currentVideoUrl"
+            muted
+            playsinline
+            :key="currentVideoKey"
+            @ended="handleVideoEnded"
+            @error="handleVideoError"
           >
             <source :src="currentVideoUrl" type="video/mp4" />
             您的浏览器不支持视频播放。
@@ -136,15 +136,18 @@ const chatMessages = ref(null)
 const inputMessage = ref('')
 const isSending = ref(false)
 const isInitializing = ref(false)
+const isDownloading = ref(false)
 const isConnected = ref(false)
 const currentVideoUrl = ref('')
+const currentVideoKey = ref(0)
+const videoQueue = ref([])
+const isPlaying = ref(false)
 
 let ws = null
 
 const chatStore = useChatStore()
 
 const settings = reactive({
-  apiKey: '',
   condImage: 'examples/girl.png',
   ckptDir: 'models/SoulX-FlashHead-1_3B',
   wav2vecDir: 'models/wav2vec2-base-960h',
@@ -159,6 +162,27 @@ const scrollToBottom = () => {
       chatMessages.value.scrollTop = chatMessages.value.scrollHeight
     }
   })
+}
+
+const playNextVideo = () => {
+  if (videoQueue.value.length > 0) {
+    const nextVideo = videoQueue.value.shift()
+    currentVideoUrl.value = nextVideo
+    currentVideoKey.value += 1
+    chatStore.setCurrentVideoUrl(nextVideo)
+    isPlaying.value = true
+    
+    nextTick(() => {
+      if (videoPlayer.value) {
+        videoPlayer.value.load()
+        videoPlayer.value.play().catch(e => {
+          console.log('自动播放失败，等待用户交互:', e)
+        })
+      }
+    })
+  } else {
+    isPlaying.value = false
+  }
 }
 
 const connectWebSocket = () => {
@@ -202,15 +226,13 @@ const handleWebSocketMessage = (data) => {
     scrollToBottom()
   } else if (data.type === 'error') {
     ElMessage.error(data.message)
-  } else if (data.type === 'video_segment' || data.type === 'video_final' || data.type === 'idle_video') {
+  } else if (data.type === 'video_segment') {
     if (data.path) {
       const videoUrl = videoApi.getVideoUrl(data.path)
-      currentVideoUrl.value = videoUrl
-      chatStore.setCurrentVideoUrl(videoUrl)
+      videoQueue.value.push(videoUrl)
       
-      if (videoPlayer.value) {
-        videoPlayer.value.load()
-        videoPlayer.value.play().catch(e => console.log('自动播放失败:', e))
+      if (!isPlaying.value) {
+        playNextVideo()
       }
     }
   }
@@ -220,7 +242,7 @@ const initializeModel = async () => {
   isInitializing.value = true
   try {
     await chatApi.initialize(settings)
-    ElMessage.success('模型初始化成功')
+    ElMessage.success('模型初始化成功，正在生成视频流...')
   } catch (error) {
     console.error('初始化失败:', error)
     ElMessage.error('初始化失败: ' + (error.response?.data?.message || error.message))
@@ -232,11 +254,6 @@ const initializeModel = async () => {
 const sendMessage = async () => {
   if (!inputMessage.value.trim()) {
     ElMessage.warning('请输入消息')
-    return
-  }
-  
-  if (!settings.apiKey.trim()) {
-    ElMessage.warning('请先配置 API Key')
     return
   }
   
@@ -253,7 +270,6 @@ const sendMessage = async () => {
   try {
     const response = await chatApi.sendMessage({
       message,
-      apiKey: settings.apiKey,
       condImage: settings.condImage,
       ckptDir: settings.ckptDir,
       wav2vecDir: settings.wav2vecDir,
@@ -271,6 +287,34 @@ const sendMessage = async () => {
   } finally {
     isSending.value = false
   }
+}
+
+const downloadCompleteVideo = async () => {
+  isDownloading.value = true
+  try {
+    const link = document.createElement('a')
+    link.href = '/api/video/stream-complete'
+    link.download = 'SoulX-FlashHead_' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.mp4'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    ElMessage.success('完整视频下载已开始（使用StreamingResponseBody）')
+  } catch (error) {
+    console.error('下载失败:', error)
+    ElMessage.error('下载失败: ' + error.message)
+  } finally {
+    isDownloading.value = false
+  }
+}
+
+const handleVideoEnded = () => {
+  console.log('视频播放结束，播放下一个')
+  playNextVideo()
+}
+
+const handleVideoError = (e) => {
+  console.error('视频播放错误:', e)
+  playNextVideo()
 }
 
 onMounted(() => {
