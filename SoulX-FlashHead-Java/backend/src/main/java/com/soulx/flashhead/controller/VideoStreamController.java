@@ -1,6 +1,7 @@
 package com.soulx.flashhead.controller;
 
 import com.soulx.flashhead.service.ChatService;
+import com.soulx.flashhead.service.VideoStreamService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -17,11 +18,57 @@ import java.util.List;
 public class VideoStreamController {
     
     private final ChatService chatService;
+    private final VideoStreamService videoStreamService;
 
-    public VideoStreamController(ChatService chatService) {
+    public VideoStreamController(ChatService chatService, VideoStreamService videoStreamService) {
         this.chatService = chatService;
+        this.videoStreamService = videoStreamService;
     }
 
+    /**
+     * 实时视频流 - 持续推送合并后的视频
+     */
+    @GetMapping(value = "/live-stream", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    public ResponseEntity<StreamingResponseBody> liveStream() {
+        log.info("开始实时视频流");
+        
+        StreamingResponseBody responseBody = outputStream -> {
+            try {
+                videoStreamService.startStream(outputStream);
+            } catch (Exception e) {
+                log.error("视频流处理错误", e);
+            }
+        };
+
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType("video/mp4"))
+                .header("Content-Disposition", "inline")
+                .body(responseBody);
+    }
+
+    /**
+     * 添加视频段到实时流
+     */
+    @PostMapping("/add-segment")
+    public ResponseEntity<?> addSegment(@RequestBody SegmentRequest request) {
+        log.info("添加视频段到流: {}", request.getPath());
+        videoStreamService.addSegment(request.getPath());
+        return ResponseEntity.ok().build();
+    }
+
+    /**
+     * 停止视频流
+     */
+    @PostMapping("/stop-stream")
+    public ResponseEntity<?> stopStream() {
+        log.info("停止视频流");
+        videoStreamService.stopStream();
+        return ResponseEntity.ok().build();
+    }
+
+    /**
+     * 流式传输完整合并视频（下载用）
+     */
     @GetMapping(value = "/stream-complete", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
     public ResponseEntity<StreamingResponseBody> streamCompleteVideo() {
         log.info("开始传输完整视频流");
@@ -41,12 +88,18 @@ public class VideoStreamController {
                 
                 ProcessBuilder pb = new ProcessBuilder(
                     "ffmpeg",
+                    "-y",
                     "-f", "concat",
                     "-safe", "0",
                     "-i", listFile.getAbsolutePath(),
-                    "-c", "copy",
-                    "-f", "mp4",
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-profile:v", "baseline",
+                    "-level", "3.0",
                     "-movflags", "frag_keyframe+empty_moov",
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    "-f", "mp4",
                     "-"
                 );
                 
@@ -62,6 +115,8 @@ public class VideoStreamController {
                     }
                 }
                 
+            } catch (Exception e) {
+                log.error("传输视频流失败", e);
             } finally {
                 if (ffmpegProcess != null) {
                     ffmpegProcess.destroy();
@@ -74,6 +129,7 @@ public class VideoStreamController {
 
         return ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType("video/mp4"))
+                .header("Content-Disposition", "attachment; filename=\"SoulX-FlashHead.mp4\"")
                 .body(responseBody);
     }
 
@@ -89,5 +145,18 @@ public class VideoStreamController {
         }
         
         return tempFile;
+    }
+
+    // 请求DTO
+    public static class SegmentRequest {
+        private String path;
+        
+        public String getPath() {
+            return path;
+        }
+        
+        public void setPath(String path) {
+            this.path = path;
+        }
     }
 }

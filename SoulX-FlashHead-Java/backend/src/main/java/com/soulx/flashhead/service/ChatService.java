@@ -22,6 +22,7 @@ public class ChatService {
     private final PythonServiceClient pythonServiceClient;
     private final ChatWebSocketHandler webSocketHandler;
     private final FlashHeadProperties properties;
+    private final VideoStreamService videoStreamService;
     
     private final List<ChatMessage> chatHistory = Collections.synchronizedList(new ArrayList<>());
     private final Map<String, Boolean> processingSessions = new ConcurrentHashMap<>();
@@ -41,11 +42,13 @@ public class ChatService {
     public ChatService(VolcengineClient volcengineClient, 
                        PythonServiceClient pythonServiceClient,
                        ChatWebSocketHandler webSocketHandler,
-                       FlashHeadProperties properties) {
+                       FlashHeadProperties properties,
+                       VideoStreamService videoStreamService) {
         this.volcengineClient = volcengineClient;
         this.pythonServiceClient = pythonServiceClient;
         this.webSocketHandler = webSocketHandler;
         this.properties = properties;
+        this.videoStreamService = videoStreamService;
     }
 
     public List<ChatMessage> getChatHistory() {
@@ -120,6 +123,9 @@ public class ChatService {
     public void addVideoSegment(String videoPath) {
         sessionVideoSegments.add(videoPath);
         log.info("添加视频片段: {}", videoPath);
+        
+        // 同时添加到实时视频流
+        videoStreamService.addSegment(videoPath);
     }
     
     private void cleanupAudioFile() {

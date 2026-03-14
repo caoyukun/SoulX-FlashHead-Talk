@@ -77,7 +77,7 @@ def _write_frames_to_mp4(frames_list, video_path, fps):
 
 
 def save_video_with_audio(frames_list, video_path, audio_path, fps):
-    """将视频帧和音频合并为完整的MP4文件"""
+    """将视频帧和音频合并为完整的MP4文件，使用适合流式播放的格式"""
     import subprocess
     
     temp_path = video_path.replace(".mp4", "_temp.mp4")
@@ -87,8 +87,14 @@ def save_video_with_audio(frames_list, video_path, audio_path, fps):
             "ffmpeg", "-y",
             "-i", temp_path,
             "-i", audio_path,
-            "-c:v", "copy",
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "baseline",
+            "-level", "3.0",
+            "-movflags", "frag_keyframe+empty_moov+default_base_moof",
             "-c:a", "aac",
+            "-b:a", "128k",
+            "-f", "mp4",
             video_path,
         ]
         subprocess.run(cmd, check=True, capture_output=True)
@@ -461,7 +467,14 @@ def generate_video_streaming():
         
         if use_streaming_callback:
             notify_backend_generation_complete()
+            # 异步模式下不生成最终视频（音频文件可能已被删除）
+            return jsonify({
+                "status": "success",
+                "stream_id": stream_id,
+                "segments": segment_paths
+            })
         
+        # 同步模式下生成最终视频
         output_dir = "chat_results"
         os.makedirs(output_dir, exist_ok=True)
         final_filename = f"res_{stream_id}.mp4"
@@ -481,7 +494,26 @@ def generate_video_streaming():
 
 @app.route('/generate-idle-video', methods=['POST'])
 def generate_idle_video():
-    """生成空闲视频"""
+    """
+    生成空闲视频 - 用于生成没有音频输入时的自然面部动作视频
+    
+    主要功能：
+    - 根据条件图像生成带有微表情和自然动作的空闲视频
+    - 使用静音音频作为输入驱动面部动作
+    - 生成的视频可以用于对话间隙或等待状态
+    
+    请求参数：
+    - duration: 视频时长（秒），默认3.0
+    - cond_image: 条件图像路径，默认 examples/girl.png
+    - ckpt_dir: 模型检查点目录
+    - wav2vec_dir: Wav2Vec模型目录
+    - model_type: 模型类型（lite/full）
+    - seed: 随机种子
+    - use_face_crop: 是否使用人脸裁剪
+    
+    返回：
+    - 包含生成视频路径的JSON响应
+    """
     if not FLASHHEAD_AVAILABLE:
         return jsonify({"error": "FlashHead 模块不可用"}), 500
     
