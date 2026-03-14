@@ -29,6 +29,7 @@ public class ChatService {
     
     private final List<String> sessionVideoSegments = Collections.synchronizedList(new ArrayList<>());
     private final AtomicBoolean isGeneratingIdle = new AtomicBoolean(false);
+    private final AtomicBoolean hasReceivedFirstReply = new AtomicBoolean(false);
     private final AtomicBoolean hasPendingReply = new AtomicBoolean(false);
     private Thread idleVideoThread = null;
     private String currentCondImage;
@@ -69,6 +70,7 @@ public class ChatService {
         this.currentUseFaceCrop = useFaceCrop;
         
         sessionVideoSegments.clear();
+        hasReceivedFirstReply.set(false);
         startIdleVideoGeneration();
     }
 
@@ -81,7 +83,8 @@ public class ChatService {
             log.info("开始持续生成空闲视频");
             while (!Thread.currentThread().isInterrupted()) {
                 try {
-                    if (hasPendingReply.get()) {
+                    // 只有在收到第一个回复视频后才停止生成空闲视频
+                    if (hasReceivedFirstReply.get()) {
                         Thread.sleep(100);
                         continue;
                     }
@@ -124,6 +127,13 @@ public class ChatService {
         sessionVideoSegments.add(videoPath);
         log.info("添加视频片段: {}", videoPath);
         
+        // 检查是否是第一个回复视频
+        boolean isReply = !videoPath.contains("idle");
+        if (isReply && !hasReceivedFirstReply.get()) {
+            hasReceivedFirstReply.set(true);
+            log.info("收到第一个回复视频，停止生成空闲视频");
+        }
+        
         // 同时添加到实时视频流
         videoStreamService.addSegment(videoPath);
     }
@@ -145,6 +155,10 @@ public class ChatService {
         cleanupAudioFile();
         hasPendingReply.set(false);
         processingSessions.clear();
+        
+        // 重新开始生成空闲视频
+        hasReceivedFirstReply.set(false);
+        log.info("重新开始生成空闲视频");
     }
     
     public void processChatMessage(String userMessage, String sessionId) {
@@ -155,6 +169,7 @@ public class ChatService {
         
         processingSessions.put(sessionId, true);
         hasPendingReply.set(true);
+        hasReceivedFirstReply.set(false); // 重置，等待新的回复视频
         
         new Thread(() -> {
             try {
