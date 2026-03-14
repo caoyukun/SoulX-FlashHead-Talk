@@ -33,7 +33,7 @@ public class VolcengineClient {
     public String getChatResponse(String userMessage, List<ChatMessage> chatHistory) throws IOException {
         VolcengineRequest request = new VolcengineRequest();
         
-        String systemPrompt = "你是一个友好、智能的数字人助手。请用自然、亲切的语气回答用户的问题，回复要简洁明了。";
+        String systemPrompt = "你是数字人雪梦婵。请用自然、亲切的语气和用户聊天，回复要简洁明了。禁止使用emoji";
         request.getMessages().add(new VolcengineRequest.Message("system", systemPrompt));
         
         int historyCount = Math.min(chatHistory.size(), 10);

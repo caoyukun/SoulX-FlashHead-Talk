@@ -1,193 +1,211 @@
 <template>
-  <div class="chat-app">
-    <div class="main-container">
-      <div class="video-section">
-        <div class="video-wrapper" @mouseenter="showControls = true" @mouseleave="showControls = false">
-          <video
-            ref="videoPlayer1"
-            class="digital-human-video"
-            :class="{ active: currentPlayerIndex === 0 }"
-            playsinline
-            preload="auto"
-            :loop="false"
-            @timeupdate="handleTimeUpdate"
-            @loadedmetadata="handleMetadataLoaded"
-            @ended="handleVideoEnded(0)"
-            @error="handleVideoError(0, $event)"
-            @volumechange="handleVolumeChange"
-            @canplaythrough="handleCanPlayThrough(0)"
-          >
-            您的浏览器不支持视频播放。
-          </video>
-          
-          <video
-            ref="videoPlayer2"
-            class="digital-human-video"
-            :class="{ active: currentPlayerIndex === 1 }"
-            playsinline
-            preload="auto"
-            :loop="false"
-            @timeupdate="handleTimeUpdate"
-            @loadedmetadata="handleMetadataLoaded"
-            @ended="handleVideoEnded(1)"
-            @error="handleVideoError(1, $event)"
-            @volumechange="handleVolumeChange"
-            @canplaythrough="handleCanPlayThrough(1)"
-          >
-            您的浏览器不支持视频播放。
-          </video>
-          
-          <div class="video-overlay" :class="{ 'controls-visible': showControls || alwaysShowControls }">
-            <div class="status-bar">
-              <div class="connection-status" :class="{ connected: isConnected }">
-                <span class="status-dot"></span>
-                {{ isConnected ? '已连接' : '连接中...' }}
-              </div>
-              <button class="toggle-controls-btn" @click="alwaysShowControls = !alwaysShowControls">
-                {{ alwaysShowControls ? '隐藏控件' : '显示控件' }}
-              </button>
-            </div>
-            
-            <div class="custom-controls" v-if="alwaysShowControls">
-              <div class="progress-container" @click="handleProgressClick">
-                <div class="progress-bar" :style="{ width: globalProgress + '%' }"></div>
-              </div>
-              
-              <div class="controls-row">
-                <span class="time-display">{{ formatTime(currentGlobalTime) }} / {{ formatTime(totalDuration) }}</span>
-                
-                <div class="center-controls">
-                  <button class="control-btn" @click="togglePlay">
-                    {{ isPaused ? '▶️' : '⏸️' }}
-                  </button>
-                </div>
-                
-                <button class="control-btn" @click="toggleMute">
-                  {{ isMuted ? '🔇' : '🔊' }}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+  <div class="video-chat-app">
+    <!-- 左侧：1:1 视频区域 -->
+    <div class="left-panel">
+      <div class="video-wrapper" @click="toggleControls">
+        <video
+          ref="videoPlayer1"
+          class="digital-human-video"
+          :class="{ active: currentPlayerIndex === 0 }"
+          playsinline
+          preload="auto"
+          :loop="false"
+          @timeupdate="handleTimeUpdate"
+          @loadedmetadata="handleMetadataLoaded"
+          @ended="handleVideoEnded(0)"
+          @error="handleVideoError(0, $event)"
+          @volumechange="handleVolumeChange"
+          @canplaythrough="handleCanPlayThrough(0)"
+        >
+          您的浏览器不支持视频播放。
+        </video>
         
-        <div class="settings-toggle" @click="showSettings = !showSettings">
-          <span class="toggle-icon">{{ showSettings ? '⚙️' : '⚙️' }}</span>
-          <span class="toggle-text">{{ showSettings ? '隐藏设置' : '显示设置' }}</span>
-        </div>
+        <video
+          ref="videoPlayer2"
+          class="digital-human-video"
+          :class="{ active: currentPlayerIndex === 1 }"
+          playsinline
+          preload="auto"
+          :loop="false"
+          @timeupdate="handleTimeUpdate"
+          @loadedmetadata="handleMetadataLoaded"
+          @ended="handleVideoEnded(1)"
+          @error="handleVideoError(1, $event)"
+          @volumechange="handleVolumeChange"
+          @canplaythrough="handleCanPlayThrough(1)"
+        >
+          您的浏览器不支持视频播放。
+        </video>
         
-        <transition name="settings">
-          <div class="settings-panel" v-if="showSettings">
-            <div class="panel-header">
-              <span class="panel-title">⚙️ 设置</span>
-            </div>
-            
-            <div class="panel-content">
-              <div class="form-item">
-                <label>数字人照片</label>
-                <el-input v-model="settings.condImage" placeholder="examples/girl.png" size="small" />
+        <!-- 视频控制覆盖层 -->
+        <div class="video-overlay" :class="{ 'controls-visible': showOverlay }">
+          <div class="top-bar">
+            <div class="user-info">
+              <div class="avatar">
+                <img v-if="settings.condImage" :src="getAvatarUrl()" alt="avatar" />
+                <span v-else>🤖</span>
               </div>
-              
-              <el-collapse class="advanced-collapse">
-                <el-collapse-item title="🔧 高级设置">
-                  <div class="form-item">
-                    <label>Checkpoint目录</label>
-                    <el-input v-model="settings.ckptDir" placeholder="models/SoulX-FlashHead-1_3B" size="small" />
-                  </div>
-                  
-                  <div class="form-item">
-                    <label>Wav2Vec目录</label>
-                    <el-input v-model="settings.wav2vecDir" placeholder="models/wav2vec2-base-960h" size="small" />
-                  </div>
-                  
-                  <div class="form-item">
-                    <label>模型类型</label>
-                    <el-select v-model="settings.modelType" placeholder="请选择" size="small" style="width: 100%">
-                      <el-option label="Pro" value="pro" />
-                      <el-option label="Lite" value="lite" />
-                    </el-select>
-                  </div>
-                  
-                  <div class="form-item">
-                    <label>随机种子</label>
-                    <el-input-number v-model="settings.seed" :min="0" size="small" style="width: 100%" />
-                  </div>
-                  
-                  <div class="form-item">
-                    <label>人脸裁剪</label>
-                    <el-switch v-model="settings.useFaceCrop" />
-                  </div>
-                </el-collapse-item>
-              </el-collapse>
-              
-              <div class="button-group">
-                <el-button type="primary" @click="initializeModel" :loading="isInitializing" size="small" style="flex: 1">
-                  初始化模型
-                </el-button>
-                <el-button type="success" @click="downloadCompleteVideo" :loading="isDownloading" size="small">
-                  📥
-                </el-button>
+              <div class="user-details">
+                <h3>数字人助手</h3>
+                <span class="status" :class="{ online: isConnected }">
+                  <span class="status-dot"></span>
+                  {{ isConnected ? '在线' : '连接中...' }}
+                </span>
               </div>
             </div>
-          </div>
-        </transition>
-      </div>
-      
-      <div class="chat-section">
-        <div class="chat-header">
-          <div class="avatar">
-            <div class="avatar-circle">🤖</div>
-          </div>
-          <div class="chat-info">
-            <h2>数字人助手</h2>
-            <p class="status-text">随时为您服务</p>
-          </div>
-        </div>
-        
-        <div class="chat-messages" ref="chatMessages">
-          <div
-            v-for="(msg, index) in chatStore.chatHistory"
-            :key="index"
-            class="message-item"
-          >
-            <div class="message-row user">
-              <div class="message-content">
-                <div class="message-bubble">{{ msg.user }}</div>
-              </div>
-              <div class="message-avatar">👤</div>
-            </div>
-            <div class="message-row assistant">
-              <div class="message-avatar">🤖</div>
-              <div class="message-content">
-                <div class="message-bubble">{{ msg.assistant }}</div>
-              </div>
-            </div>
+            <button class="icon-btn" @click.stop="showSettings = !showSettings">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M12 1v6m0 6v6m4.22-10.22l4.24-4.24M6.34 6.34L2.1 2.1m17.8 17.8l-4.24-4.24M6.34 17.66l-4.24 4.24M23 12h-6m-6 0H1m20.07-4.93l-4.24 4.24M6.34 6.34l-4.24-4.24"></path>
+              </svg>
+            </button>
           </div>
           
-          <div v-if="chatStore.chatHistory.length === 0" class="empty-state">
-            <div class="empty-icon">👋</div>
-            <p>开始和数字人聊天吧！</p>
-          </div>
-        </div>
-        
-        <div class="chat-input-area">
-          <el-input
-            v-model="inputMessage"
-            type="textarea"
-            :rows="2"
-            placeholder="请输入您想说的话..."
-            @keyup.enter.ctrl="sendMessage"
-            :disabled="isSending"
-            resize="none"
-          />
-          <div class="input-actions">
-            <span class="hint-text">Ctrl + Enter 发送</span>
-            <el-button type="primary" @click="sendMessage" :loading="isSending" round>
-              发送
-            </el-button>
+          <!-- 底部控制栏 -->
+          <div class="bottom-controls">
+            <button class="control-btn" :class="{ active: isMuted }" @click.stop="toggleMute">
+              <svg v-if="isMuted" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                <line x1="23" y1="9" x2="17" y2="15"></line>
+                <line x1="17" y1="9" x2="23" y2="15"></line>
+              </svg>
+              <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+              </svg>
+            </button>
           </div>
         </div>
       </div>
     </div>
+    
+    <!-- 右侧：文字内容区域 -->
+    <div class="right-panel">
+      <!-- 头部 -->
+      <div class="chat-header">
+        <h2>对话内容</h2>
+      </div>
+      
+      <!-- 消息列表 -->
+      <div class="chat-content" ref="chatMessages">
+        <div v-for="(msg, index) in chatStore.chatHistory" :key="index" class="message-item">
+          <div class="message-row user" v-if="msg.user">
+            <div class="message-avatar">👤</div>
+            <div class="message-bubble user">{{ msg.user }}</div>
+          </div>
+          <div class="message-row assistant" v-if="msg.assistant">
+            <div class="message-avatar">🤖</div>
+            <div class="message-bubble assistant">{{ msg.assistant }}</div>
+          </div>
+        </div>
+        
+        <div v-if="chatStore.chatHistory.length === 0" class="empty-state">
+          <div class="empty-icon">💬</div>
+          <p>开始和数字人对话吧</p>
+        </div>
+      </div>
+      
+      <!-- 底部输入区域 -->
+      <div class="chat-input-area">
+        <!-- 语音输入按钮 -->
+        <button 
+          class="voice-btn" 
+          :class="{ recording: isRecording }"
+          @mousedown="startVoiceInput"
+          @mouseup="stopVoiceInput"
+          @touchstart="startVoiceInput"
+          @touchend="stopVoiceInput"
+        >
+          <svg v-if="!isRecording" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+            <line x1="12" y1="19" x2="12" y2="23"></line>
+            <line x1="8" y1="23" x2="16" y2="23"></line>
+          </svg>
+          <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="6" y="4" width="4" height="16"></rect>
+            <rect x="14" y="4" width="4" height="16"></rect>
+          </svg>
+        </button>
+        
+        <!-- 文本输入 -->
+        <div class="text-input-wrapper">
+          <input
+            v-model="inputMessage"
+            type="text"
+            placeholder="输入消息或按住麦克风说话..."
+            @keyup.enter="sendMessage"
+            :disabled="isSending || isRecording"
+          />
+          <button class="send-btn" @click="sendMessage" :disabled="!inputMessage.trim() || isSending">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </div>
+        
+        <!-- 录音提示 -->
+        <div v-if="isRecording" class="recording-indicator">
+          <span class="recording-dot"></span>
+          <span>{{ recordingTime }}s</span>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 设置面板 -->
+    <transition name="slide-up">
+      <div v-if="showSettings" class="settings-modal" @click.self="showSettings = false">
+        <div class="settings-content">
+          <div class="settings-header">
+            <h3>设置</h3>
+            <button class="icon-btn" @click="showSettings = false">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+          
+          <div class="settings-body">
+            <div class="form-group">
+              <label>数字人照片</label>
+              <el-input v-model="settings.condImage" placeholder="examples/girl.png" size="small" />
+            </div>
+            
+            <el-collapse>
+              <el-collapse-item title="高级设置">
+                <div class="form-group">
+                  <label>Checkpoint目录</label>
+                  <el-input v-model="settings.ckptDir" placeholder="models/SoulX-FlashHead-1_3B" size="small" />
+                </div>
+                <div class="form-group">
+                  <label>Wav2Vec目录</label>
+                  <el-input v-model="settings.wav2vecDir" placeholder="models/wav2vec2-base-960h" size="small" />
+                </div>
+                <div class="form-group">
+                  <label>模型类型</label>
+                  <el-select v-model="settings.modelType" size="small" style="width: 100%">
+                    <el-option label="Pro" value="pro" />
+                    <el-option label="Lite" value="lite" />
+                  </el-select>
+                </div>
+                <div class="form-group">
+                  <label>随机种子</label>
+                  <el-input-number v-model="settings.seed" :min="0" size="small" style="width: 100%" />
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+            
+            <div class="settings-actions">
+              <el-button type="primary" @click="initializeModel" :loading="isInitializing" style="width: 100%">
+                初始化模型
+              </el-button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -197,36 +215,39 @@ import { ElMessage } from 'element-plus'
 import { useChatStore } from '../store/chat'
 import { chatApi, videoApi } from '../api'
 
+// 视频播放器
 const videoPlayer1 = ref(null)
 const videoPlayer2 = ref(null)
 const chatMessages = ref(null)
+
+// 状态
 const inputMessage = ref('')
 const isSending = ref(false)
 const isInitializing = ref(false)
-const isDownloading = ref(false)
 const isConnected = ref(false)
 const isMuted = ref(false)
 const isPaused = ref(false)
 const savedVolume = ref(1)
-const showControls = ref(false)
-const alwaysShowControls = ref(false)
-const showSettings = ref(true)
+const showOverlay = ref(true)
+const showSettings = ref(false)
 
+// 语音输入
+const isRecording = ref(false)
+const recordingTime = ref(0)
+let recordingTimer = null
+let mediaRecorder = null
+let audioChunks = []
+
+// 双播放器管理
 const currentPlayerIndex = ref(0)
 const videoPlayers = computed(() => [videoPlayer1, videoPlayer2])
 const currentVideoPlayer = computed(() => videoPlayers.value[currentPlayerIndex.value])
-const nextVideoPlayer = computed(() => videoPlayers.value[1 - currentPlayerIndex.value])
 
 const videoReadyState = reactive({ 0: false, 1: false })
 
+// 视频段管理
 const videoSegments = ref([])
 let currentSegmentIndex = ref(-1)
-const totalDuration = ref(0)
-const currentGlobalTime = ref(0)
-const globalProgress = computed(() => {
-  if (totalDuration.value === 0) return 0
-  return Math.min(100, (currentGlobalTime.value / totalDuration.value) * 100)
-})
 
 let hasUserInteracted = ref(false)
 let ws = null
@@ -244,6 +265,12 @@ const settings = reactive({
   useFaceCrop: false
 })
 
+// 获取头像URL
+const getAvatarUrl = () => {
+  return videoApi.getVideoUrl(settings.condImage)
+}
+
+// 滚动到底部
 const scrollToBottom = () => {
   nextTick(() => {
     if (chatMessages.value) {
@@ -252,40 +279,67 @@ const scrollToBottom = () => {
   })
 }
 
-const formatTime = (seconds) => {
-  if (!seconds || isNaN(seconds)) return '00:00'
-  const mins = Math.floor(seconds / 60)
-  const secs = Math.floor(seconds % 60)
-  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+// 切换控制栏显示
+const toggleControls = () => {
+  showOverlay.value = !showOverlay.value
 }
 
-const recalculateTotalDuration = () => {
-  let total = 0
-  videoSegments.value.forEach((segment) => {
-    segment.startOffset = total
-    if (segment.duration && !isNaN(segment.duration)) {
-      total += segment.duration
+// 语音输入
+const startVoiceInput = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    mediaRecorder = new MediaRecorder(stream)
+    audioChunks = []
+    
+    mediaRecorder.ondataavailable = (event) => {
+      audioChunks.push(event.data)
     }
-  })
-  totalDuration.value = total
-  console.log('重新计算总时长:', totalDuration.value)
+    
+    mediaRecorder.onstop = async () => {
+      const audioBlob = new Blob(audioChunks, { type: 'audio/wav' })
+      await processVoiceInput(audioBlob)
+    }
+    
+    mediaRecorder.start()
+    isRecording.value = true
+    recordingTime.value = 0
+    recordingTimer = setInterval(() => {
+      recordingTime.value++
+    }, 1000)
+  } catch (error) {
+    console.error('无法访问麦克风:', error)
+    ElMessage.error('无法访问麦克风，请检查权限设置')
+  }
 }
 
-const preloadVideoToPlayer = (index, playerIndex) => {
-  if (index < 0 || index >= videoSegments.value.length) {
-    console.log('视频段索引超出范围')
-    return
+const stopVoiceInput = () => {
+  if (mediaRecorder && isRecording.value) {
+    mediaRecorder.stop()
+    mediaRecorder.stream.getTracks().forEach(track => track.stop())
+    isRecording.value = false
+    clearInterval(recordingTimer)
   }
+}
+
+const processVoiceInput = async (audioBlob) => {
+  try {
+    ElMessage.info('语音输入功能需要接入语音识别服务')
+  } catch (error) {
+    console.error('语音识别失败:', error)
+  }
+}
+
+// 视频播放相关函数
+const preloadVideoToPlayer = (index, playerIndex) => {
+  if (index < 0 || index >= videoSegments.value.length) return
   
   const segment = videoSegments.value[index]
   const player = videoPlayers.value[playerIndex]
   
   if (player?.value && segment?.url) {
-    console.log(`预加载视频段 ${index} 到播放器 ${playerIndex}:`, segment.path)
     player.value.src = segment.url
     player.value.muted = true
     player.value.volume = savedVolume.value
-    player.value.loop = false
     player.value.load()
     videoReadyState[playerIndex] = false
   }
@@ -294,7 +348,6 @@ const preloadVideoToPlayer = (index, playerIndex) => {
 const switchToNextVideo = () => {
   const nextIndex = currentSegmentIndex.value + 1
   if (nextIndex >= videoSegments.value.length) {
-    console.log('没有更多视频')
     isPaused.value = true
     return
   }
@@ -302,12 +355,7 @@ const switchToNextVideo = () => {
   const nextPlayerIndex = 1 - currentPlayerIndex.value
   const prevPlayerIndex = 1 - nextPlayerIndex
   
-  if (!videoReadyState[nextPlayerIndex]) {
-    console.log('下一个视频还未准备好，等待中...')
-    return
-  }
-  
-  console.log('丝滑切换到下一个视频段:', nextIndex)
+  if (!videoReadyState[nextPlayerIndex]) return
   
   const nextPlayer = videoPlayers.value[nextPlayerIndex]
   const prevPlayer = videoPlayers.value[prevPlayerIndex]
@@ -316,14 +364,7 @@ const switchToNextVideo = () => {
     nextPlayer.value.currentTime = 0
     nextPlayer.value.muted = isMuted.value
     nextPlayer.value.volume = savedVolume.value
-    nextPlayer.value.loop = false
-    
-    if (hasUserInteracted.value || !isPaused.value) {
-      nextPlayer.value.play().catch((err) => {
-        console.log('自动播放失败:', err)
-        isPaused.value = true
-      })
-    }
+    nextPlayer.value.play().catch(() => {})
   }
   
   currentSegmentIndex.value = nextIndex
@@ -334,7 +375,6 @@ const switchToNextVideo = () => {
     if (prevPlayer?.value) {
       prevPlayer.value.pause()
       prevPlayer.value.muted = true
-      prevPlayer.value.currentTime = 0
     }
   }, 150)
   
@@ -345,14 +385,9 @@ const switchToNextVideo = () => {
 }
 
 const playSegment = (index) => {
-  if (index < 0 || index >= videoSegments.value.length) {
-    console.log('视频段索引超出范围')
-    return
-  }
+  if (index < 0 || index >= videoSegments.value.length) return
   
   const segment = videoSegments.value[index]
-  console.log('播放视频段:', index, segment.path)
-  
   currentSegmentIndex.value = index
   isWaitingForNewVideo.value = false
   
@@ -376,46 +411,23 @@ const playSegment = (index) => {
     player.value.src = segment.url
     player.value.muted = isMuted.value
     player.value.volume = savedVolume.value
-    player.value.loop = false
     player.value.load()
-    
-    if (hasUserInteracted.value || !isPaused.value) {
-      const playPromise = player.value.play()
-      if (playPromise !== undefined) {
-        playPromise.catch(() => {
-          isPaused.value = true
-        })
-      }
-    } else {
-      isPaused.value = true
-    }
+    player.value.play().catch(() => { isPaused.value = true })
   }
 }
 
-const handleTimeUpdate = () => {
-  if (currentSegmentIndex.value >= 0) {
-    const player = currentVideoPlayer.value
-    const segment = videoSegments.value[currentSegmentIndex.value]
-    if (player?.value && segment && segment.startOffset !== undefined) {
-      currentGlobalTime.value = segment.startOffset + (player.value.currentTime || 0)
-    }
-  }
-}
+const handleTimeUpdate = () => {}
 
 const handleMetadataLoaded = (e) => {
   const player = e.target
-  console.log('元数据加载:', player.duration, 'src:', player.src)
-  
   for (let i = 0; i < videoSegments.value.length; i++) {
     const segment = videoSegments.value[i]
     const segmentFilename = segment.url.split('/').pop()
     const playerFilename = player.src.split('/').pop()
     
-    if (segmentFilename === playerFilename || segment.url === player.src) {
-      if ((segment.duration === undefined || segment.duration === 0 || isNaN(segment.duration)) && player.duration && !isNaN(player.duration)) {
+    if (segmentFilename === playerFilename) {
+      if (!segment.duration && player.duration) {
         segment.duration = player.duration
-        console.log('视频段', i, '时长已设置:', segment.duration)
-        recalculateTotalDuration()
       }
       break
     }
@@ -423,7 +435,6 @@ const handleMetadataLoaded = (e) => {
 }
 
 const handleCanPlayThrough = (playerIndex) => {
-  console.log(`播放器 ${playerIndex} 视频准备就绪 (canplaythrough)`)
   videoReadyState[playerIndex] = true
 }
 
@@ -432,12 +443,7 @@ let lastEndedTime = 0
 
 const handleVideoEnded = (playerIndex) => {
   const now = Date.now()
-  console.log('视频段播放结束，playerIndex:', playerIndex, 'currentSegmentIndex:', currentSegmentIndex.value, 'isWaitingForNewVideo:', isWaitingForNewVideo.value)
-  
-  if (now - lastEndedTime < 100) {
-    console.log('超快速重复的ended事件，忽略')
-    return
-  }
+  if (now - lastEndedTime < 100) return
   lastEndedTime = now
   
   if (checkInterval) {
@@ -450,9 +456,7 @@ const handleVideoEnded = (playerIndex) => {
     if (videoReadyState[nextPlayerIndex]) {
       switchToNextVideo()
     } else {
-      console.log('等待下一个视频准备好...')
       isWaitingForNewVideo.value = true
-      
       let checkCount = 0
       checkInterval = setInterval(() => {
         checkCount++
@@ -465,18 +469,15 @@ const handleVideoEnded = (playerIndex) => {
           clearInterval(checkInterval)
           checkInterval = null
           isWaitingForNewVideo.value = false
-          console.log('等待超时，保持当前状态等待新视频')
         }
       }, 100)
     }
   } else {
-    console.log('所有视频段播放完毕，等待新视频...')
     isWaitingForNewVideo.value = true
   }
 }
 
 const handleVideoError = (playerIndex, e) => {
-  console.error('视频播放错误:', playerIndex, e)
   if (currentSegmentIndex.value < videoSegments.value.length - 1) {
     playSegment(currentSegmentIndex.value + 1)
   }
@@ -486,10 +487,8 @@ const handleVolumeChange = () => {
   const player = currentVideoPlayer.value
   if (player?.value) {
     isMuted.value = player.value.muted
-    if (!isMuted.value) {
-      savedVolume.value = player.value.volume
-    }
-    const otherPlayer = nextVideoPlayer.value
+    if (!isMuted.value) savedVolume.value = player.value.volume
+    const otherPlayer = videoPlayers.value[1 - currentPlayerIndex.value]
     if (otherPlayer?.value) {
       otherPlayer.value.muted = isMuted.value
       otherPlayer.value.volume = savedVolume.value
@@ -497,107 +496,42 @@ const handleVolumeChange = () => {
   }
 }
 
-const handleProgressClick = (event) => {
-  if (!alwaysShowControls || totalDuration.value === 0) return
-  
-  const rect = event.currentTarget.getBoundingClientRect()
-  const x = event.clientX - rect.left
-  const percentage = Math.max(0, Math.min(1, x / rect.width))
-  const targetTime = percentage * totalDuration.value
-  
-  console.log('跳转到时间:', targetTime)
-  
-  let targetIndex = 0
-  let accumulatedTime = 0
-  for (let i = 0; i < videoSegments.value.length; i++) {
-    const segment = videoSegments.value[i]
-    if (!segment.duration || isNaN(segment.duration)) continue
-    
-    if (targetTime < accumulatedTime + segment.duration) {
-      targetIndex = i
-      break
-    }
-    accumulatedTime += segment.duration
-    targetIndex = i
-  }
-  
-  if (targetIndex !== currentSegmentIndex.value) {
-    currentPlayerIndex.value = 0
-    playSegment(targetIndex)
-  }
-  
-  setTimeout(() => {
-    const player = currentVideoPlayer.value
-    if (player?.value && videoSegments.value[targetIndex]) {
-      const segment = videoSegments.value[targetIndex]
-      const localTime = targetTime - segment.startOffset
-      player.value.currentTime = Math.max(0, Math.min(localTime, segment.duration || 0))
-    }
-  }, 200)
-}
-
-const togglePlay = () => {
-  const player = currentVideoPlayer.value
-  if (!player?.value) return
-  
-  hasUserInteracted.value = true
-  
-  if (isPaused.value) {
-    player.value.play().catch(() => {})
-    isPaused.value = false
-  } else {
-    player.value.pause()
-    isPaused.value = true
-  }
-}
-
 const toggleMute = () => {
   const player = currentVideoPlayer.value
-  if (!player?.value) return
-  player.value.muted = !player.value.muted
+  if (player?.value) {
+    player.value.muted = !player.value.muted
+  }
 }
 
 const addVideoSegment = (path) => {
-  console.log('addVideoSegment called:', path)
-  
-  const type = path.includes('idle') ? 'idle' : 'reply'
   const videoUrl = videoApi.getVideoUrl(path)
   
   const newSegment = {
     url: videoUrl,
     path,
-    type,
-    duration: undefined,
-    startOffset: totalDuration.value
+    duration: undefined
   }
   videoSegments.value.push(newSegment)
   
   if (tempVideo) {
     tempVideo.src = videoUrl
     tempVideo.onloadedmetadata = () => {
-      if (newSegment.duration === undefined || isNaN(newSegment.duration)) {
+      if (!newSegment.duration && tempVideo.duration) {
         newSegment.duration = tempVideo.duration
-        console.log('快速获取视频段', videoSegments.value.length - 1, '时长:', newSegment.duration)
-        recalculateTotalDuration()
       }
     }
     tempVideo.load()
   }
   
-  console.log('视频队列长度:', videoSegments.value.length, 'currentSegmentIndex:', currentSegmentIndex.value)
-  
   if (currentSegmentIndex.value === -1 && videoSegments.value.length > 0) {
-    console.log('开始播放视频')
     isWaitingForNewVideo.value = false
     playSegment(0)
     isPaused.value = false
   } else if (currentSegmentIndex.value + 1 === videoSegments.value.length - 1) {
-    console.log('预加载新添加的视频')
     preloadVideoToPlayer(videoSegments.value.length - 1, 1 - currentPlayerIndex.value)
   }
   
   if (isWaitingForNewVideo.value || (isPaused.value && currentSegmentIndex.value >= 0)) {
-    console.log('收到新视频，取消等待状态或恢复播放')
     isWaitingForNewVideo.value = false
     isPaused.value = false
     
@@ -605,16 +539,13 @@ const addVideoSegment = (path) => {
       const player = currentVideoPlayer.value
       if (player?.value) {
         if (currentSegmentIndex.value === videoSegments.value.length - 2) {
-          console.log('播放到最后一个视频，有新视频，预加载并切换')
           preloadVideoToPlayer(videoSegments.value.length - 1, 1 - currentPlayerIndex.value)
-          
           const checkReady = setInterval(() => {
             if (videoReadyState[1 - currentPlayerIndex.value]) {
               clearInterval(checkReady)
               switchToNextVideo()
             }
           }, 100)
-          
           setTimeout(() => {
             clearInterval(checkReady)
             if (currentSegmentIndex.value < videoSegments.value.length - 1) {
@@ -622,17 +553,8 @@ const addVideoSegment = (path) => {
             }
           }, 1000)
         } else if (player.value.paused) {
-          console.log('播放器已暂停，直接播放')
           player.value.play().catch(() => {})
         }
-      }
-    }
-    
-    if (currentSegmentIndex.value >= 0 && currentSegmentIndex.value < videoSegments.value.length - 1) {
-      const nextPlayerIndex = 1 - currentPlayerIndex.value
-      if (videoReadyState[nextPlayerIndex]) {
-        console.log('新视频已准备好，立即切换')
-        switchToNextVideo()
       }
     }
   }
@@ -645,10 +567,8 @@ const connectWebSocket = () => {
   ws = new WebSocket(wsUrl)
   
   ws.onopen = () => {
-    console.log('WebSocket 连接成功')
     isConnected.value = true
     chatStore.setConnected(true)
-    ElMessage.success('WebSocket 连接成功')
   }
   
   ws.onmessage = (event) => {
@@ -660,14 +580,12 @@ const connectWebSocket = () => {
     }
   }
   
-  ws.onerror = (error) => {
-    console.error('WebSocket 错误:', error)
+  ws.onerror = () => {
     isConnected.value = false
     chatStore.setConnected(false)
   }
   
   ws.onclose = () => {
-    console.log('WebSocket 连接关闭')
     isConnected.value = false
     chatStore.setConnected(false)
   }
@@ -680,9 +598,7 @@ const handleWebSocketMessage = (data) => {
   } else if (data.type === 'error') {
     ElMessage.error(data.message)
   } else if (data.type === 'video_segment') {
-    if (data.path) {
-      addVideoSegment(data.path)
-    }
+    if (data.path) addVideoSegment(data.path)
   }
 }
 
@@ -690,18 +606,14 @@ const initializeModel = async () => {
   isInitializing.value = true
   try {
     await chatApi.initialize(settings)
-    
     videoSegments.value = []
     currentSegmentIndex.value = -1
-    totalDuration.value = 0
-    currentGlobalTime.value = 0
     currentPlayerIndex.value = 0
     videoReadyState[0] = false
     videoReadyState[1] = false
-    
-    ElMessage.success('模型初始化成功，正在生成视频流...')
+    ElMessage.success('模型初始化成功')
+    showSettings.value = false
   } catch (error) {
-    console.error('初始化失败:', error)
     ElMessage.error('初始化失败: ' + (error.response?.data?.message || error.message))
   } finally {
     isInitializing.value = false
@@ -709,15 +621,11 @@ const initializeModel = async () => {
 }
 
 const sendMessage = async () => {
-  if (!inputMessage.value.trim()) {
-    ElMessage.warning('请输入消息')
-    return
-  }
+  if (!inputMessage.value.trim()) return
   
   hasUserInteracted.value = true
   
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    ElMessage.warning('WebSocket 未连接，正在尝试连接...')
     connectWebSocket()
     return
   }
@@ -736,145 +644,56 @@ const sendMessage = async () => {
       seed: settings.seed,
       useFaceCrop: settings.useFaceCrop
     })
-    
-    const sessionId = response.data.sessionId
-    chatStore.setSessionId(sessionId)
-    ElMessage.info('消息已发送，正在处理...')
+    chatStore.setSessionId(response.data.sessionId)
   } catch (error) {
-    console.error('发送消息失败:', error)
-    ElMessage.error('发送消息失败: ' + (error.response?.data?.message || error.message))
+    ElMessage.error('发送消息失败')
   } finally {
     isSending.value = false
   }
 }
 
-const downloadCompleteVideo = async () => {
-  isDownloading.value = true
-  try {
-    const link = document.createElement('a')
-    link.href = '/api/video/stream-complete'
-    link.download = 'SoulX-FlashHead_' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.mp4'
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    ElMessage.success('完整视频下载已开始')
-  } catch (error) {
-    console.error('下载失败:', error)
-    ElMessage.error('下载失败: ' + error.message)
-  } finally {
-    isDownloading.value = false
-  }
-}
-
 onMounted(() => {
-  console.log('ChatView mounted')
-  
   tempVideo = document.createElement('video')
   tempVideo.preload = 'metadata'
-  
   connectWebSocket()
-  
-  const handleInteraction = () => {
-    hasUserInteracted.value = true
-    const player = currentVideoPlayer.value
-    if (player?.value && player.value.paused && !isPaused.value) {
-      player.value.play().catch(() => {})
-    }
-  }
-  
-  document.addEventListener('click', handleInteraction)
-  document.addEventListener('keydown', handleInteraction)
-  
-  onUnmounted(() => {
-    document.removeEventListener('click', handleInteraction)
-    document.removeEventListener('keydown', handleInteraction)
-  })
 })
 
 onUnmounted(() => {
-  if (ws) {
-    ws.close()
-  }
+  if (ws) ws.close()
+  if (recordingTimer) clearInterval(recordingTimer)
 })
 </script>
 
 <style scoped>
-.chat-app {
+.video-chat-app {
   width: 100%;
   height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #0a0a0a;
+  display: flex;
+  overflow: hidden;
+}
+
+/* 左侧：1:1 视频区域 */
+.left-panel {
+  flex: 0 0 auto;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 20px;
-  box-sizing: border-box;
-}
-
-.main-container {
-  display: flex;
-  gap: 20px;
-  width: 100%;
-  max-width: 1400px;
-  height: calc(100vh - 40px);
-}
-
-.video-section {
-  flex: 0 0 520px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.settings-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 12px 20px;
-  background: white;
-  border-radius: 12px;
-  cursor: pointer;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-  transition: all 0.3s ease;
-}
-
-.settings-toggle:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.15);
-}
-
-.toggle-icon {
-  font-size: 20px;
-}
-
-.toggle-text {
-  color: #495057;
-  font-size: 14px;
-  font-weight: 500;
-}
-
-.settings-enter-active,
-.settings-leave-active {
-  transition: all 0.3s ease;
-  max-height: 500px;
-  opacity: 1;
-}
-
-.settings-enter-from,
-.settings-leave-to {
-  max-height: 0;
-  opacity: 0;
-  overflow: hidden;
+  background: #000;
 }
 
 .video-wrapper {
   position: relative;
-  width: 100%;
-  aspect-ratio: 1 / 1;
-  background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
-  border-radius: 24px;
+  width: calc(100vh - 40px);
+  height: calc(100vh - 40px);
+  max-width: calc(100vw - 400px);
+  max-height: calc(100vw - 400px);
+  background: #1a1a1a;
+  border-radius: 16px;
   overflow: hidden;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
 
 .digital-human-video {
@@ -884,59 +703,102 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  z-index: 1;
   opacity: 0;
+  z-index: 1;
 }
 
 .digital-human-video.active {
   opacity: 1;
-  z-index: 10;
+  z-index: 2;
 }
 
+/* 视频控制覆盖层 */
 .video-overlay {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
   bottom: 0;
-  z-index: 20;
+  z-index: 10;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  pointer-events: none;
+  padding: 16px;
+  background: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.5) 0%,
+    transparent 30%,
+    transparent 70%,
+    rgba(0, 0, 0, 0.5) 100%
+  );
+  opacity: 0;
+  transition: opacity 0.3s ease;
 }
 
 .video-overlay.controls-visible {
-  pointer-events: auto;
+  opacity: 1;
 }
 
-.status-bar {
+/* 顶部栏 */
+.top-bar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 16px 20px;
-  background: linear-gradient(180deg, rgba(0,0,0,0.6) 0%, transparent 100%);
 }
 
-.connection-status {
+.user-info {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+}
+
+.avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+}
+
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.user-details h3 {
   color: white;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
+  margin: 0;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 11px;
+}
+
+.status.online {
+  color: #51cf66;
 }
 
 .status-dot {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: #ff6b6b;
-  animation: pulse 2s infinite;
 }
 
-.connection-status.connected .status-dot {
+.status.online .status-dot {
   background: #51cf66;
+  animation: pulse 2s infinite;
 }
 
 @keyframes pulse {
@@ -944,202 +806,92 @@ onUnmounted(() => {
   50% { opacity: 0.5; }
 }
 
-.toggle-controls-btn {
-  background: rgba(255, 255, 255, 0.15);
-  border: none;
-  color: white;
-  padding: 6px 12px;
-  border-radius: 20px;
-  font-size: 12px;
-  cursor: pointer;
-  backdrop-filter: blur(10px);
-  transition: all 0.3s ease;
-}
-
-.toggle-controls-btn:hover {
-  background: rgba(255, 255, 255, 0.25);
-}
-
-.custom-controls {
-  padding: 16px 20px;
-  background: linear-gradient(0deg, rgba(0,0,0,0.7) 0%, transparent 100%);
-}
-
-.progress-container {
-  width: 100%;
-  height: 4px;
-  background: rgba(255,255,255,0.2);
-  border-radius: 2px;
-  cursor: pointer;
-  margin-bottom: 12px;
-}
-
-.progress-bar {
-  height: 100%;
-  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-  border-radius: 2px;
-  transition: width 0.1s linear;
-}
-
-.controls-row {
+/* 底部控制栏 */
+.bottom-controls {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.time-display {
-  color: white;
-  font-size: 13px;
-  font-weight: 500;
-  min-width: 100px;
-}
-
-.center-controls {
-  display: flex;
-  gap: 12px;
+  justify-content: center;
 }
 
 .control-btn {
-  background: rgba(255, 255, 255, 0.15);
-  border: none;
-  color: white;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
-  font-size: 18px;
-  cursor: pointer;
+  border: none;
+  background: rgba(255, 255, 255, 0.15);
   backdrop-filter: blur(10px);
-  transition: all 0.3s ease;
+  color: white;
+  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: all 0.3s ease;
 }
 
 .control-btn:hover {
-  background: rgba(255, 255, 255, 0.3);
-  transform: scale(1.1);
+  background: rgba(255, 255, 255, 0.25);
 }
 
-.settings-panel {
-  background: white;
-  border-radius: 16px;
-  overflow: hidden;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+.control-btn.active {
+  background: rgba(255, 71, 87, 0.8);
 }
 
-.panel-header {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  padding: 16px 20px;
-}
-
-.panel-title {
-  color: white;
-  font-weight: 600;
-  font-size: 15px;
-}
-
-.panel-content {
-  padding: 20px;
-}
-
-.form-item {
-  margin-bottom: 16px;
-}
-
-.form-item label {
-  display: block;
-  color: #495057;
-  font-size: 13px;
-  font-weight: 500;
-  margin-bottom: 8px;
-}
-
-.advanced-collapse {
-  margin-bottom: 16px;
-}
-
-.button-group {
-  display: flex;
-  gap: 10px;
-}
-
-.chat-section {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  background: white;
-  border-radius: 24px;
-  overflow: hidden;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-}
-
-.chat-header {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 20px 24px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.avatar {
-  flex-shrink: 0;
-}
-
-.avatar-circle {
-  width: 56px;
-  height: 56px;
+/* 图标按钮 */
+.icon-btn {
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  color: white;
+  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 28px;
-  border: 3px solid rgba(255, 255, 255, 0.3);
+  transition: all 0.3s ease;
 }
 
-.chat-info h2 {
-  margin: 0;
+.icon-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* 右侧：文字内容区域 */
+.right-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #141414;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  min-width: 360px;
+}
+
+.chat-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.chat-header h2 {
   color: white;
-  font-size: 20px;
+  font-size: 16px;
   font-weight: 600;
+  margin: 0;
 }
 
-.status-text {
-  margin: 4px 0 0 0;
-  color: rgba(255, 255, 255, 0.8);
-  font-size: 13px;
-}
-
-.chat-messages {
+.chat-content {
   flex: 1;
   overflow-y: auto;
-  padding: 24px;
-  background: #f8f9fa;
-}
-
-.chat-messages::-webkit-scrollbar {
-  width: 6px;
-}
-
-.chat-messages::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.chat-messages::-webkit-scrollbar-thumb {
-  background: #dee2e6;
-  border-radius: 3px;
+  padding: 20px;
 }
 
 .message-item {
-  margin-bottom: 24px;
+  margin-bottom: 20px;
 }
 
 .message-row {
   display: flex;
-  gap: 12px;
-  margin-bottom: 16px;
-  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 12px;
+  align-items: flex-start;
 }
 
 .message-row.user {
@@ -1147,14 +899,14 @@ onUnmounted(() => {
 }
 
 .message-avatar {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
+  font-size: 14px;
   flex-shrink: 0;
 }
 
@@ -1162,26 +914,22 @@ onUnmounted(() => {
   background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
 }
 
-.message-content {
-  max-width: 70%;
-}
-
 .message-bubble {
-  padding: 14px 18px;
-  border-radius: 18px;
-  font-size: 15px;
+  max-width: 70%;
+  padding: 12px 16px;
+  border-radius: 16px;
+  font-size: 14px;
   line-height: 1.6;
   word-wrap: break-word;
 }
 
-.message-row.assistant .message-bubble {
-  background: white;
-  color: #212529;
+.message-bubble.assistant {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
   border-bottom-left-radius: 4px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
-.message-row.user .message-bubble {
+.message-bubble.user {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
   border-bottom-right-radius: 4px;
@@ -1193,34 +941,225 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #868e96;
+  color: rgba(255, 255, 255, 0.4);
 }
 
 .empty-icon {
-  font-size: 64px;
-  margin-bottom: 16px;
+  font-size: 48px;
+  margin-bottom: 12px;
 }
 
 .empty-state p {
   margin: 0;
-  font-size: 16px;
+  font-size: 14px;
 }
 
+/* 底部输入区域 */
 .chat-input-area {
-  padding: 20px 24px;
-  background: white;
-  border-top: 1px solid #e9ecef;
+  padding: 16px 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
-.input-actions {
+.voice-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s ease;
+  flex-shrink: 0;
+}
+
+.voice-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.voice-btn.recording {
+  background: #ff4757;
+  animation: recording-pulse 1s infinite;
+}
+
+@keyframes recording-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+}
+
+.text-input-wrapper {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  padding: 4px 4px 4px 16px;
+}
+
+.text-input-wrapper input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: white;
+  font-size: 14px;
+  outline: none;
+  padding: 8px 0;
+}
+
+.text-input-wrapper input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.send-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s ease;
+}
+
+.send-btn:hover:not(:disabled) {
+  transform: scale(1.05);
+}
+
+.send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 录音指示器 */
+.recording-indicator {
+  position: absolute;
+  bottom: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #ff4757;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.8);
+  padding: 6px 12px;
+  border-radius: 12px;
+}
+
+.recording-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ff4757;
+  animation: blink 1s infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* 设置面板 */
+.settings-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(10px);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-content {
+  width: 100%;
+  max-width: 400px;
+  background: #1a1a1a;
+  border-radius: 16px;
+  padding: 20px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.settings-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 12px;
+  margin-bottom: 20px;
 }
 
-.hint-text {
-  color: #868e96;
-  font-size: 12px;
+.settings-header h3 {
+  color: white;
+  margin: 0;
+  font-size: 18px;
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  display: block;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.settings-actions {
+  margin-top: 20px;
+}
+
+/* 动画 */
+.slide-up-enter-active,
+.slide-up-leave-active {
+  transition: all 0.3s ease;
+}
+
+.slide-up-enter-from,
+.slide-up-leave-to {
+  opacity: 0;
+}
+
+.slide-up-enter-from .settings-content,
+.slide-up-leave-to .settings-content {
+  transform: scale(0.95);
+}
+
+/* 响应式 */
+@media (max-width: 900px) {
+  .video-chat-app {
+    flex-direction: column;
+  }
+  
+  .left-panel {
+    flex: 0 0 auto;
+    height: 50vh;
+    padding: 10px;
+  }
+  
+  .video-wrapper {
+    width: calc(50vh - 20px);
+    height: calc(50vh - 20px);
+    max-width: calc(100vw - 20px);
+    max-height: calc(100vw - 20px);
+  }
+  
+  .right-panel {
+    flex: 1;
+    min-width: auto;
+    border-left: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+  }
 }
 </style>
