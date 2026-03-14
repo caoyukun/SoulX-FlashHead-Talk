@@ -1,76 +1,8 @@
 <template>
-  <el-row :gutter="20" class="chat-container">
-    <el-col :span="8">
-      <el-card class="settings-card">
-        <template #header>
-          <div class="card-header">
-            <span>⚙️ 设置</span>
-          </div>
-        </template>
-        
-        <el-form :model="settings" label-width="120px">
-          <el-form-item label="数字人照片">
-            <el-input
-              v-model="settings.condImage"
-              placeholder="examples/girl.png"
-            />
-          </el-form-item>
-          
-          <el-collapse>
-            <el-collapse-item title="🔧 高级设置">
-              <el-form-item label="Checkpoint目录">
-                <el-input
-                  v-model="settings.ckptDir"
-                  placeholder="models/SoulX-FlashHead-1_3B"
-                />
-              </el-form-item>
-              
-              <el-form-item label="Wav2Vec目录">
-                <el-input
-                  v-model="settings.wav2vecDir"
-                  placeholder="models/wav2vec2-base-960h"
-                />
-              </el-form-item>
-              
-              <el-form-item label="模型类型">
-                <el-select v-model="settings.modelType" placeholder="请选择">
-                  <el-option label="Pro" value="pro" />
-                  <el-option label="Lite" value="lite" />
-                </el-select>
-              </el-form-item>
-              
-              <el-form-item label="随机种子">
-                <el-input-number v-model="settings.seed" :min="0" />
-              </el-form-item>
-              
-              <el-form-item label="人脸裁剪">
-                <el-switch v-model="settings.useFaceCrop" />
-              </el-form-item>
-            </el-collapse-item>
-          </el-collapse>
-          
-          <el-button type="primary" @click="initializeModel" :loading="isInitializing">
-            初始化模型
-          </el-button>
-          
-          <el-button type="success" @click="downloadCompleteVideo" :loading="isDownloading" style="margin-left: 10px;">
-            📥 下载完整视频
-          </el-button>
-        </el-form>
-      </el-card>
-    </el-col>
-    
-    <el-col :span="16">
-      <el-card class="video-card">
-        <template #header>
-          <div class="card-header">
-            <span>📺 数字人</span>
-            <el-tag v-if="isConnected" type="success" size="small">已连接</el-tag>
-            <el-tag v-else type="danger" size="small">未连接</el-tag>
-          </div>
-        </template>
-        <div class="video-wrapper">
-          <!-- 两个video元素无缝切换 - 主流实现方式 -->
+  <div class="chat-app">
+    <div class="main-container">
+      <div class="video-section">
+        <div class="video-wrapper" @mouseenter="showControls = true" @mouseleave="showControls = false">
           <video
             ref="videoPlayer1"
             class="digital-human-video"
@@ -105,42 +37,111 @@
             您的浏览器不支持视频播放。
           </video>
           
-          <!-- 自定义控件层 -->
-          <div class="custom-controls" ref="customControls">
-            <!-- 进度条 -->
-            <div class="progress-container" @click="handleProgressClick">
-              <div class="progress-bar" :style="{ width: globalProgress + '%' }"></div>
+          <div class="video-overlay" :class="{ 'controls-visible': showControls || alwaysShowControls }">
+            <div class="status-bar">
+              <div class="connection-status" :class="{ connected: isConnected }">
+                <span class="status-dot"></span>
+                {{ isConnected ? '已连接' : '连接中...' }}
+              </div>
+              <button class="toggle-controls-btn" @click="alwaysShowControls = !alwaysShowControls">
+                {{ alwaysShowControls ? '隐藏控件' : '显示控件' }}
+              </button>
             </div>
             
-            <!-- 时间显示 -->
-            <div class="time-display">
-              <span>{{ formatTime(currentGlobalTime) }}</span>
-              <span>/</span>
-              <span>{{ formatTime(totalDuration) }}</span>
+            <div class="custom-controls" v-if="alwaysShowControls">
+              <div class="progress-container" @click="handleProgressClick">
+                <div class="progress-bar" :style="{ width: globalProgress + '%' }"></div>
+              </div>
+              
+              <div class="controls-row">
+                <span class="time-display">{{ formatTime(currentGlobalTime) }} / {{ formatTime(totalDuration) }}</span>
+                
+                <div class="center-controls">
+                  <button class="control-btn" @click="togglePlay">
+                    {{ isPaused ? '▶️' : '⏸️' }}
+                  </button>
+                </div>
+                
+                <button class="control-btn" @click="toggleMute">
+                  {{ isMuted ? '🔇' : '🔊' }}
+                </button>
+              </div>
             </div>
-            
-            <!-- 播放/暂停按钮 -->
-            <button class="play-btn" @click="togglePlay" v-if="!isPaused">
-              ⏸️
-            </button>
-            <button class="play-btn" @click="togglePlay" v-else>
-              ▶️
-            </button>
-            
-            <!-- 音量控制 -->
-            <button class="volume-btn" @click="toggleMute">
-              {{ isMuted ? '🔇' : '🔊' }}
-            </button>
           </div>
         </div>
-      </el-card>
-      
-      <el-card class="chat-card">
-        <template #header>
-          <div class="card-header">
-            <span>💬 聊天记录</span>
+        
+        <div class="settings-toggle" @click="showSettings = !showSettings">
+          <span class="toggle-icon">{{ showSettings ? '⚙️' : '⚙️' }}</span>
+          <span class="toggle-text">{{ showSettings ? '隐藏设置' : '显示设置' }}</span>
+        </div>
+        
+        <transition name="settings">
+          <div class="settings-panel" v-if="showSettings">
+            <div class="panel-header">
+              <span class="panel-title">⚙️ 设置</span>
+            </div>
+            
+            <div class="panel-content">
+              <div class="form-item">
+                <label>数字人照片</label>
+                <el-input v-model="settings.condImage" placeholder="examples/girl.png" size="small" />
+              </div>
+              
+              <el-collapse class="advanced-collapse">
+                <el-collapse-item title="🔧 高级设置">
+                  <div class="form-item">
+                    <label>Checkpoint目录</label>
+                    <el-input v-model="settings.ckptDir" placeholder="models/SoulX-FlashHead-1_3B" size="small" />
+                  </div>
+                  
+                  <div class="form-item">
+                    <label>Wav2Vec目录</label>
+                    <el-input v-model="settings.wav2vecDir" placeholder="models/wav2vec2-base-960h" size="small" />
+                  </div>
+                  
+                  <div class="form-item">
+                    <label>模型类型</label>
+                    <el-select v-model="settings.modelType" placeholder="请选择" size="small" style="width: 100%">
+                      <el-option label="Pro" value="pro" />
+                      <el-option label="Lite" value="lite" />
+                    </el-select>
+                  </div>
+                  
+                  <div class="form-item">
+                    <label>随机种子</label>
+                    <el-input-number v-model="settings.seed" :min="0" size="small" style="width: 100%" />
+                  </div>
+                  
+                  <div class="form-item">
+                    <label>人脸裁剪</label>
+                    <el-switch v-model="settings.useFaceCrop" />
+                  </div>
+                </el-collapse-item>
+              </el-collapse>
+              
+              <div class="button-group">
+                <el-button type="primary" @click="initializeModel" :loading="isInitializing" size="small" style="flex: 1">
+                  初始化模型
+                </el-button>
+                <el-button type="success" @click="downloadCompleteVideo" :loading="isDownloading" size="small">
+                  📥
+                </el-button>
+              </div>
+            </div>
           </div>
-        </template>
+        </transition>
+      </div>
+      
+      <div class="chat-section">
+        <div class="chat-header">
+          <div class="avatar">
+            <div class="avatar-circle">🤖</div>
+          </div>
+          <div class="chat-info">
+            <h2>数字人助手</h2>
+            <p class="status-text">随时为您服务</p>
+          </div>
+        </div>
         
         <div class="chat-messages" ref="chatMessages">
           <div
@@ -148,29 +149,46 @@
             :key="index"
             class="message-item"
           >
-            <div class="message-user">
-              <strong>用户:</strong> {{ msg.user }}
+            <div class="message-row user">
+              <div class="message-content">
+                <div class="message-bubble">{{ msg.user }}</div>
+              </div>
+              <div class="message-avatar">👤</div>
             </div>
-            <div class="message-assistant">
-              <strong>数字人:</strong> {{ msg.assistant }}
+            <div class="message-row assistant">
+              <div class="message-avatar">🤖</div>
+              <div class="message-content">
+                <div class="message-bubble">{{ msg.assistant }}</div>
+              </div>
             </div>
+          </div>
+          
+          <div v-if="chatStore.chatHistory.length === 0" class="empty-state">
+            <div class="empty-icon">👋</div>
+            <p>开始和数字人聊天吧！</p>
           </div>
         </div>
         
-        <div class="chat-input">
+        <div class="chat-input-area">
           <el-input
             v-model="inputMessage"
+            type="textarea"
+            :rows="2"
             placeholder="请输入您想说的话..."
-            @keyup.enter="sendMessage"
+            @keyup.enter.ctrl="sendMessage"
             :disabled="isSending"
+            resize="none"
           />
-          <el-button type="primary" @click="sendMessage" :loading="isSending">
-            发送
-          </el-button>
+          <div class="input-actions">
+            <span class="hint-text">Ctrl + Enter 发送</span>
+            <el-button type="primary" @click="sendMessage" :loading="isSending" round>
+              发送
+            </el-button>
+          </div>
         </div>
-      </el-card>
-    </el-col>
-  </el-row>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -181,7 +199,6 @@ import { chatApi, videoApi } from '../api'
 
 const videoPlayer1 = ref(null)
 const videoPlayer2 = ref(null)
-const customControls = ref(null)
 const chatMessages = ref(null)
 const inputMessage = ref('')
 const isSending = ref(false)
@@ -191,17 +208,17 @@ const isConnected = ref(false)
 const isMuted = ref(false)
 const isPaused = ref(false)
 const savedVolume = ref(1)
+const showControls = ref(false)
+const alwaysShowControls = ref(false)
+const showSettings = ref(true)
 
-// 双播放器管理
 const currentPlayerIndex = ref(0)
 const videoPlayers = computed(() => [videoPlayer1, videoPlayer2])
 const currentVideoPlayer = computed(() => videoPlayers.value[currentPlayerIndex.value])
 const nextVideoPlayer = computed(() => videoPlayers.value[1 - currentPlayerIndex.value])
 
-// 预加载状态跟踪
 const videoReadyState = reactive({ 0: false, 1: false })
 
-// 伪流式视频管理
 const videoSegments = ref([])
 let currentSegmentIndex = ref(-1)
 const totalDuration = ref(0)
@@ -235,7 +252,6 @@ const scrollToBottom = () => {
   })
 }
 
-// 格式化时间显示
 const formatTime = (seconds) => {
   if (!seconds || isNaN(seconds)) return '00:00'
   const mins = Math.floor(seconds / 60)
@@ -243,7 +259,6 @@ const formatTime = (seconds) => {
   return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
 }
 
-// 重新计算总时长和每个视频段的起始偏移
 const recalculateTotalDuration = () => {
   let total = 0
   videoSegments.value.forEach((segment) => {
@@ -256,7 +271,6 @@ const recalculateTotalDuration = () => {
   console.log('重新计算总时长:', totalDuration.value)
 }
 
-// 预加载视频到指定播放器（设置src并load，确保准备好）
 const preloadVideoToPlayer = (index, playerIndex) => {
   if (index < 0 || index >= videoSegments.value.length) {
     console.log('视频段索引超出范围')
@@ -277,7 +291,6 @@ const preloadVideoToPlayer = (index, playerIndex) => {
   }
 }
 
-// 切换播放器并播放 - 确保无缝切换且无混音
 const switchToNextVideo = () => {
   const nextIndex = currentSegmentIndex.value + 1
   if (nextIndex >= videoSegments.value.length) {
@@ -289,7 +302,6 @@ const switchToNextVideo = () => {
   const nextPlayerIndex = 1 - currentPlayerIndex.value
   const prevPlayerIndex = 1 - nextPlayerIndex
   
-  // 检查下一个视频是否准备好
   if (!videoReadyState[nextPlayerIndex]) {
     console.log('下一个视频还未准备好，等待中...')
     return
@@ -297,13 +309,9 @@ const switchToNextVideo = () => {
   
   console.log('丝滑切换到下一个视频段:', nextIndex)
   
-  // 更新索引切换显示
-  currentSegmentIndex.value = nextIndex
-  currentPlayerIndex.value = nextPlayerIndex
-  isWaitingForNewVideo.value = false
-  
-  // 播放下一个视频
   const nextPlayer = videoPlayers.value[nextPlayerIndex]
+  const prevPlayer = videoPlayers.value[prevPlayerIndex]
+  
   if (nextPlayer?.value) {
     nextPlayer.value.currentTime = 0
     nextPlayer.value.muted = isMuted.value
@@ -318,24 +326,24 @@ const switchToNextVideo = () => {
     }
   }
   
-  // 暂停上一个视频（延迟一点，避免闪黑）
+  currentSegmentIndex.value = nextIndex
+  currentPlayerIndex.value = nextPlayerIndex
+  isWaitingForNewVideo.value = false
+  
   setTimeout(() => {
-    const prevPlayer = videoPlayers.value[prevPlayerIndex]
     if (prevPlayer?.value) {
       prevPlayer.value.pause()
       prevPlayer.value.muted = true
       prevPlayer.value.currentTime = 0
     }
-  }, 50)
+  }, 150)
   
-  // 预加载下下个视频
   const preloadIndex = nextIndex + 1
   if (preloadIndex < videoSegments.value.length) {
     preloadVideoToPlayer(preloadIndex, 1 - nextPlayerIndex)
   }
 }
 
-// 播放指定的视频段（用于初始播放或跳转）
 const playSegment = (index) => {
   if (index < 0 || index >= videoSegments.value.length) {
     console.log('视频段索引超出范围')
@@ -348,11 +356,9 @@ const playSegment = (index) => {
   currentSegmentIndex.value = index
   isWaitingForNewVideo.value = false
   
-  // 重置准备状态
   videoReadyState[0] = false
   videoReadyState[1] = false
   
-  // 先确保所有播放器都是暂停和静音的
   for (let i = 0; i < videoPlayers.value.length; i++) {
     const p = videoPlayers.value[i]
     if (p?.value) {
@@ -361,12 +367,10 @@ const playSegment = (index) => {
     }
   }
   
-  // 预加载下一个视频到另一个播放器
   if (index + 1 < videoSegments.value.length) {
     preloadVideoToPlayer(index + 1, 1 - currentPlayerIndex.value)
   }
   
-  // 播放当前视频
   const player = currentVideoPlayer.value
   if (player?.value) {
     player.value.src = segment.url
@@ -375,7 +379,6 @@ const playSegment = (index) => {
     player.value.loop = false
     player.value.load()
     
-    // 只有当用户已交互时才尝试播放
     if (hasUserInteracted.value || !isPaused.value) {
       const playPromise = player.value.play()
       if (playPromise !== undefined) {
@@ -389,7 +392,6 @@ const playSegment = (index) => {
   }
 }
 
-// 处理时间更新，计算全局进度
 const handleTimeUpdate = () => {
   if (currentSegmentIndex.value >= 0) {
     const player = currentVideoPlayer.value
@@ -400,15 +402,12 @@ const handleTimeUpdate = () => {
   }
 }
 
-// 处理元数据加载，记录视频时长
 const handleMetadataLoaded = (e) => {
   const player = e.target
   console.log('元数据加载:', player.duration, 'src:', player.src)
   
-  // 找到对应加载的视频段（使用更宽松的匹配）
   for (let i = 0; i < videoSegments.value.length; i++) {
     const segment = videoSegments.value[i]
-    // 简单的路径匹配，避免完整URL比较问题
     const segmentFilename = segment.url.split('/').pop()
     const playerFilename = player.src.split('/').pop()
     
@@ -423,39 +422,30 @@ const handleMetadataLoaded = (e) => {
   }
 }
 
-// 视频可以播放（使用canplaythrough确保足够缓冲）
 const handleCanPlayThrough = (playerIndex) => {
   console.log(`播放器 ${playerIndex} 视频准备就绪 (canplaythrough)`)
   videoReadyState[playerIndex] = true
-  
-  // 如果不是当前播放器，不自动播放，只加载
-  // 避免同时播放导致混音问题
 }
 
-// 跟踪检查定时器，防止重复
 let checkInterval = null
 let lastEndedTime = 0
 
-// 视频播放结束，播放下一个
 const handleVideoEnded = (playerIndex) => {
   const now = Date.now()
   console.log('视频段播放结束，playerIndex:', playerIndex, 'currentSegmentIndex:', currentSegmentIndex.value, 'isWaitingForNewVideo:', isWaitingForNewVideo.value)
   
-  // 只过滤超级快速的重复（100ms内），避免正常切换被阻止
   if (now - lastEndedTime < 100) {
     console.log('超快速重复的ended事件，忽略')
     return
   }
   lastEndedTime = now
   
-  // 清除之前的检查定时器
   if (checkInterval) {
     clearInterval(checkInterval)
     checkInterval = null
   }
   
   if (currentSegmentIndex.value < videoSegments.value.length - 1) {
-    // 检查下一个视频是否准备好
     const nextPlayerIndex = 1 - currentPlayerIndex.value
     if (videoReadyState[nextPlayerIndex]) {
       switchToNextVideo()
@@ -463,7 +453,6 @@ const handleVideoEnded = (playerIndex) => {
       console.log('等待下一个视频准备好...')
       isWaitingForNewVideo.value = true
       
-      // 每隔100ms检查一次，最多等待
       let checkCount = 0
       checkInterval = setInterval(() => {
         checkCount++
@@ -473,7 +462,6 @@ const handleVideoEnded = (playerIndex) => {
           isWaitingForNewVideo.value = false
           switchToNextVideo()
         } else if (checkCount > 300) {
-          // 30秒超时，不再等待
           clearInterval(checkInterval)
           checkInterval = null
           isWaitingForNewVideo.value = false
@@ -484,7 +472,6 @@ const handleVideoEnded = (playerIndex) => {
   } else {
     console.log('所有视频段播放完毕，等待新视频...')
     isWaitingForNewVideo.value = true
-    // 不设置isPaused，这样当收到新视频时能自动恢复
   }
 }
 
@@ -502,7 +489,6 @@ const handleVolumeChange = () => {
     if (!isMuted.value) {
       savedVolume.value = player.value.volume
     }
-    // 同步到另一个播放器
     const otherPlayer = nextVideoPlayer.value
     if (otherPlayer?.value) {
       otherPlayer.value.muted = isMuted.value
@@ -511,18 +497,16 @@ const handleVolumeChange = () => {
   }
 }
 
-// 处理进度条点击，跳转到指定位置
 const handleProgressClick = (event) => {
-  if (!customControls.value || totalDuration.value === 0) return
+  if (!alwaysShowControls || totalDuration.value === 0) return
   
-  const rect = customControls.value.getBoundingClientRect()
+  const rect = event.currentTarget.getBoundingClientRect()
   const x = event.clientX - rect.left
   const percentage = Math.max(0, Math.min(1, x / rect.width))
   const targetTime = percentage * totalDuration.value
   
   console.log('跳转到时间:', targetTime)
   
-  // 找到对应的视频段
   let targetIndex = 0
   let accumulatedTime = 0
   for (let i = 0; i < videoSegments.value.length; i++) {
@@ -537,13 +521,11 @@ const handleProgressClick = (event) => {
     targetIndex = i
   }
   
-  // 切换到目标视频段并设置播放位置
   if (targetIndex !== currentSegmentIndex.value) {
     currentPlayerIndex.value = 0
     playSegment(targetIndex)
   }
   
-  // 等待视频加载后设置播放位置
   setTimeout(() => {
     const player = currentVideoPlayer.value
     if (player?.value && videoSegments.value[targetIndex]) {
@@ -554,7 +536,6 @@ const handleProgressClick = (event) => {
   }, 200)
 }
 
-// 切换播放/暂停
 const togglePlay = () => {
   const player = currentVideoPlayer.value
   if (!player?.value) return
@@ -570,14 +551,12 @@ const togglePlay = () => {
   }
 }
 
-// 切换静音
 const toggleMute = () => {
   const player = currentVideoPlayer.value
   if (!player?.value) return
   player.value.muted = !player.value.muted
 }
 
-// 添加视频到队列
 const addVideoSegment = (path) => {
   console.log('addVideoSegment called:', path)
   
@@ -593,7 +572,6 @@ const addVideoSegment = (path) => {
   }
   videoSegments.value.push(newSegment)
   
-  // 使用临时video快速获取时长
   if (tempVideo) {
     tempVideo.src = videoUrl
     tempVideo.onloadedmetadata = () => {
@@ -608,34 +586,28 @@ const addVideoSegment = (path) => {
   
   console.log('视频队列长度:', videoSegments.value.length, 'currentSegmentIndex:', currentSegmentIndex.value)
   
-  // 如果没有在播放，开始播放
   if (currentSegmentIndex.value === -1 && videoSegments.value.length > 0) {
     console.log('开始播放视频')
     isWaitingForNewVideo.value = false
     playSegment(0)
     isPaused.value = false
   } else if (currentSegmentIndex.value + 1 === videoSegments.value.length - 1) {
-    // 如果正在播放倒数第二个视频，预加载下一个
     console.log('预加载新添加的视频')
     preloadVideoToPlayer(videoSegments.value.length - 1, 1 - currentPlayerIndex.value)
   }
   
-  // 如果正在等待新视频，或者当前已经播放完所有视频，立即处理
   if (isWaitingForNewVideo.value || (isPaused.value && currentSegmentIndex.value >= 0)) {
     console.log('收到新视频，取消等待状态或恢复播放')
     isWaitingForNewVideo.value = false
     isPaused.value = false
     
-    // 检查当前播放状态和新视频情况
     if (currentSegmentIndex.value >= 0) {
       const player = currentVideoPlayer.value
       if (player?.value) {
-        // 情况1：当前播放到最后一个视频，现在有新视频了
         if (currentSegmentIndex.value === videoSegments.value.length - 2) {
           console.log('播放到最后一个视频，有新视频，预加载并切换')
           preloadVideoToPlayer(videoSegments.value.length - 1, 1 - currentPlayerIndex.value)
           
-          // 等待视频准备好后切换
           const checkReady = setInterval(() => {
             if (videoReadyState[1 - currentPlayerIndex.value]) {
               clearInterval(checkReady)
@@ -643,23 +615,19 @@ const addVideoSegment = (path) => {
             }
           }, 100)
           
-          // 1秒后无论如何尝试切换
           setTimeout(() => {
             clearInterval(checkReady)
             if (currentSegmentIndex.value < videoSegments.value.length - 1) {
               switchToNextVideo()
             }
           }, 1000)
-        }
-        // 情况2：当前播放器已暂停，直接播放
-        else if (player.value.paused) {
+        } else if (player.value.paused) {
           console.log('播放器已暂停，直接播放')
           player.value.play().catch(() => {})
         }
       }
     }
     
-    // 如果有下一个视频并且已准备好，直接切换
     if (currentSegmentIndex.value >= 0 && currentSegmentIndex.value < videoSegments.value.length - 1) {
       const nextPlayerIndex = 1 - currentPlayerIndex.value
       if (videoReadyState[nextPlayerIndex]) {
@@ -723,7 +691,6 @@ const initializeModel = async () => {
   try {
     await chatApi.initialize(settings)
     
-    // 重置视频队列
     videoSegments.value = []
     currentSegmentIndex.value = -1
     totalDuration.value = 0
@@ -802,13 +769,11 @@ const downloadCompleteVideo = async () => {
 onMounted(() => {
   console.log('ChatView mounted')
   
-  // 创建临时video用于快速获取时长
   tempVideo = document.createElement('video')
   tempVideo.preload = 'metadata'
   
   connectWebSocket()
   
-  // 监听用户交互
   const handleInteraction = () => {
     hasUserInteracted.value = true
     const player = currentVideoPlayer.value
@@ -834,34 +799,82 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.chat-container {
-  height: 100%;
-}
-
-.card-header {
+.chat-app {
+  width: 100%;
+  height: 100vh;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  font-weight: bold;
-  font-size: 16px;
+  justify-content: center;
+  padding: 20px;
+  box-sizing: border-box;
 }
 
-.settings-card,
-.video-card,
-.chat-card {
-  margin-bottom: 20px;
+.main-container {
+  display: flex;
+  gap: 20px;
+  width: 100%;
+  max-width: 1400px;
+  height: calc(100vh - 40px);
+}
+
+.video-section {
+  flex: 0 0 520px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 20px;
+  background: white;
+  border-radius: 12px;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  transition: all 0.3s ease;
+}
+
+.settings-toggle:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.15);
+}
+
+.toggle-icon {
+  font-size: 20px;
+}
+
+.toggle-text {
+  color: #495057;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.settings-enter-active,
+.settings-leave-active {
+  transition: all 0.3s ease;
+  max-height: 500px;
+  opacity: 1;
+}
+
+.settings-enter-from,
+.settings-leave-to {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
 }
 
 .video-wrapper {
   position: relative;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  background-color: #000;
-  border-radius: 8px;
-  overflow: hidden;
-  min-height: 512px;
   width: 100%;
+  aspect-ratio: 1 / 1;
+  background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
+  border-radius: 24px;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
 }
 
 .digital-human-video {
@@ -870,8 +883,7 @@ onUnmounted(() => {
   left: 0;
   width: 100%;
   height: 100%;
-  min-height: 512px;
-  object-fit: contain;
+  object-fit: cover;
   z-index: 1;
   opacity: 0;
 }
@@ -881,89 +893,334 @@ onUnmounted(() => {
   z-index: 10;
 }
 
-.custom-controls {
+.video-overlay {
   position: absolute;
-  bottom: 0;
+  top: 0;
   left: 0;
   right: 0;
-  background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
-  padding: 10px;
+  bottom: 0;
+  z-index: 20;
   display: flex;
   flex-direction: column;
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.video-overlay.controls-visible {
+  pointer-events: auto;
+}
+
+.status-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  background: linear-gradient(180deg, rgba(0,0,0,0.6) 0%, transparent 100%);
+}
+
+.connection-status {
+  display: flex;
+  align-items: center;
   gap: 8px;
-  z-index: 10;
+  color: white;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ff6b6b;
+  animation: pulse 2s infinite;
+}
+
+.connection-status.connected .status-dot {
+  background: #51cf66;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.toggle-controls-btn {
+  background: rgba(255, 255, 255, 0.15);
+  border: none;
+  color: white;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  transition: all 0.3s ease;
+}
+
+.toggle-controls-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.custom-controls {
+  padding: 16px 20px;
+  background: linear-gradient(0deg, rgba(0,0,0,0.7) 0%, transparent 100%);
 }
 
 .progress-container {
   width: 100%;
-  height: 6px;
-  background-color: rgba(255,255,255,0.3);
-  border-radius: 3px;
+  height: 4px;
+  background: rgba(255,255,255,0.2);
+  border-radius: 2px;
   cursor: pointer;
+  margin-bottom: 12px;
 }
 
 .progress-bar {
   height: 100%;
-  background-color: #409eff;
-  border-radius: 3px;
+  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+  border-radius: 2px;
   transition: width 0.1s linear;
 }
 
-.time-display {
+.controls-row {
   display: flex;
+  justify-content: space-between;
   align-items: center;
-  gap: 5px;
-  color: white;
-  font-size: 14px;
 }
 
-.play-btn,
-.volume-btn {
-  background: none;
+.time-display {
+  color: white;
+  font-size: 13px;
+  font-weight: 500;
+  min-width: 100px;
+}
+
+.center-controls {
+  display: flex;
+  gap: 12px;
+}
+
+.control-btn {
+  background: rgba(255, 255, 255, 0.15);
   border: none;
   color: white;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
   font-size: 18px;
   cursor: pointer;
-  padding: 5px;
+  backdrop-filter: blur(10px);
+  transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.play-btn:hover,
-.volume-btn:hover {
+.control-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
   transform: scale(1.1);
 }
 
-.chat-messages {
-  height: 300px;
-  overflow-y: auto;
-  padding: 10px;
-  background-color: #f5f7fa;
-  border-radius: 4px;
-  margin-bottom: 15px;
+.settings-panel {
+  background: white;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
 }
 
-.message-item {
-  margin-bottom: 15px;
-  padding: 10px;
-  background-color: white;
-  border-radius: 4px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+.panel-header {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  padding: 16px 20px;
 }
 
-.message-user {
-  color: #409eff;
-  margin-bottom: 5px;
+.panel-title {
+  color: white;
+  font-weight: 600;
+  font-size: 15px;
 }
 
-.message-assistant {
-  color: #67c23a;
+.panel-content {
+  padding: 20px;
 }
 
-.chat-input {
+.form-item {
+  margin-bottom: 16px;
+}
+
+.form-item label {
+  display: block;
+  color: #495057;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+
+.advanced-collapse {
+  margin-bottom: 16px;
+}
+
+.button-group {
   display: flex;
   gap: 10px;
 }
 
-.chat-input .el-input {
+.chat-section {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: white;
+  border-radius: 24px;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 24px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.avatar {
+  flex-shrink: 0;
+}
+
+.avatar-circle {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  border: 3px solid rgba(255, 255, 255, 0.3);
+}
+
+.chat-info h2 {
+  margin: 0;
+  color: white;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.status-text {
+  margin: 4px 0 0 0;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 13px;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  background: #f8f9fa;
+}
+
+.chat-messages::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-messages::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-messages::-webkit-scrollbar-thumb {
+  background: #dee2e6;
+  border-radius: 3px;
+}
+
+.message-item {
+  margin-bottom: 24px;
+}
+
+.message-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  align-items: flex-end;
+}
+
+.message-row.user {
+  flex-direction: row-reverse;
+}
+
+.message-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.message-row.user .message-avatar {
+  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+}
+
+.message-content {
+  max-width: 70%;
+}
+
+.message-bubble {
+  padding: 14px 18px;
+  border-radius: 18px;
+  font-size: 15px;
+  line-height: 1.6;
+  word-wrap: break-word;
+}
+
+.message-row.assistant .message-bubble {
+  background: white;
+  color: #212529;
+  border-bottom-left-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.message-row.user .message-bubble {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border-bottom-right-radius: 4px;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #868e96;
+}
+
+.empty-icon {
+  font-size: 64px;
+  margin-bottom: 16px;
+}
+
+.empty-state p {
+  margin: 0;
+  font-size: 16px;
+}
+
+.chat-input-area {
+  padding: 20px 24px;
+  background: white;
+  border-top: 1px solid #e9ecef;
+}
+
+.input-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.hint-text {
+  color: #868e96;
+  font-size: 12px;
 }
 </style>

@@ -1,13 +1,6 @@
 <template>
   <div id="app">
-    <el-container class="app-container">
-      <el-header>
-        <h1>🎭 SoulX-FlashHead 数字人实时聊天</h1>
-      </el-header>
-      <el-main>
-        <ChatView />
-      </el-main>
-    </el-container>
+    <ChatView />
   </div>
 </template>
 
@@ -28,25 +21,5 @@ import ChatView from './views/ChatView.vue'
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   height: 100vh;
-}
-
-.app-container {
-  height: 100%;
-}
-
-.el-header {
-  background-color: #409eff;
-  color: white;
-  display: flex;
-  align-items: center;
-  padding: 0 20px;
-}
-
-.el-header h1 {
-  font-size: 24px;
-}
-
-.el-main {
-  padding: 20px;
 }
 </style>

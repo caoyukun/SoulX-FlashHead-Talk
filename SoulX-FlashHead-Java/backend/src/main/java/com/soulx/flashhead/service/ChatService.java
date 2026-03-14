@@ -83,8 +83,8 @@ public class ChatService {
             log.info("开始持续生成空闲视频");
             while (!Thread.currentThread().isInterrupted()) {
                 try {
-                    // 只有在收到第一个回复视频后才停止生成空闲视频
-                    if (hasReceivedFirstReply.get()) {
+                    // 只有在没有pending回复且没有收到第一个回复视频时才生成空闲视频
+                    if (hasReceivedFirstReply.get() || hasPendingReply.get()) {
                         Thread.sleep(100);
                         continue;
                     }
