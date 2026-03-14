@@ -1,7 +1,7 @@
 <template>
   <div class="video-chat-app">
-    <!-- 左侧：1:1 视频区域 -->
-    <div class="left-panel">
+    <!-- 左侧/中间：1:1 视频区域 -->
+    <div class="video-panel" :class="{ 'centered': !showChatPanel }">
       <div class="video-wrapper" @click="toggleControls">
         <video
           ref="videoPlayer1"
@@ -46,19 +46,27 @@
                 <span v-else>🤖</span>
               </div>
               <div class="user-details">
-                <h3>数字人助手</h3>
+                <h3>雪梦婵</h3>
                 <span class="status" :class="{ online: isConnected }">
                   <span class="status-dot"></span>
                   {{ isConnected ? '在线' : '连接中...' }}
                 </span>
               </div>
             </div>
-            <button class="icon-btn" @click.stop="showSettings = !showSettings">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="3"></circle>
-                <path d="M12 1v6m0 6v6m4.22-10.22l4.24-4.24M6.34 6.34L2.1 2.1m17.8 17.8l-4.24-4.24M6.34 17.66l-4.24 4.24M23 12h-6m-6 0H1m20.07-4.93l-4.24 4.24M6.34 6.34l-4.24-4.24"></path>
-              </svg>
-            </button>
+            <div class="top-actions">
+              <button class="icon-btn" @click.stop="showSettings = !showSettings">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="3"></circle>
+                  <path d="M12 1v6m0 6v6m4.22-10.22l4.24-4.24M6.34 6.34L2.1 2.1m17.8 17.8l-4.24-4.24M6.34 17.66l-4.24 4.24M23 12h-6m-6 0H1m20.07-4.93l-4.24 4.24M6.34 6.34l-4.24-4.24"></path>
+                </svg>
+              </button>
+              <button class="icon-btn" @click.stop="showChatPanel = !showChatPanel" v-if="showChatPanel">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            </div>
           </div>
           
           <!-- 底部控制栏 -->
@@ -77,84 +85,121 @@
           </div>
         </div>
       </div>
-    </div>
-    
-    <!-- 右侧：文字内容区域 -->
-    <div class="right-panel">
-      <!-- 头部 -->
-      <div class="chat-header">
-        <h2>对话内容</h2>
-      </div>
       
-      <!-- 消息列表 -->
-      <div class="chat-content" ref="chatMessages">
-        <div v-for="(msg, index) in chatStore.chatHistory" :key="index" class="message-item">
-          <div class="message-row user" v-if="msg.user">
-            <div class="message-avatar">👤</div>
-            <div class="message-bubble user">{{ msg.user }}</div>
-          </div>
-          <div class="message-row assistant" v-if="msg.assistant">
-            <div class="message-avatar">🤖</div>
-            <div class="message-bubble assistant">{{ msg.assistant }}</div>
-          </div>
-        </div>
-        
-        <div v-if="chatStore.chatHistory.length === 0" class="empty-state">
-          <div class="empty-icon">💬</div>
-          <p>开始和数字人对话吧</p>
-        </div>
-      </div>
-      
-      <!-- 底部输入区域 -->
-      <div class="chat-input-area">
-        <!-- 语音输入按钮 -->
+      <!-- 底部浮动输入区（当对话面板收起时显示） -->
+      <div v-if="!showChatPanel" class="floating-input-area">
         <button 
-          class="voice-btn" 
+          class="voice-btn large" 
           :class="{ recording: isRecording }"
           @mousedown="startVoiceInput"
           @mouseup="stopVoiceInput"
           @touchstart="startVoiceInput"
           @touchend="stopVoiceInput"
         >
-          <svg v-if="!isRecording" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg v-if="!isRecording" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
             <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
             <line x1="12" y1="19" x2="12" y2="23"></line>
             <line x1="8" y1="23" x2="16" y2="23"></line>
           </svg>
-          <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg v-else width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="6" y="4" width="4" height="16"></rect>
             <rect x="14" y="4" width="4" height="16"></rect>
           </svg>
         </button>
-        
-        <!-- 文本输入 -->
-        <div class="text-input-wrapper">
-          <input
-            v-model="inputMessage"
-            type="text"
-            placeholder="输入消息或按住麦克风说话..."
-            @keyup.enter="sendMessage"
-            :disabled="isSending || isRecording"
-          />
-          <button class="send-btn" @click="sendMessage" :disabled="!inputMessage.trim() || isSending">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="22" y1="2" x2="11" y2="13"></line>
-              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        <span class="voice-hint">{{ isRecording ? `录音中 ${recordingTime}s` : '按住说话' }}</span>
+      </div>
+    </div>
+    
+    <!-- 右侧：对话内容区域 -->
+    <transition name="slide">
+      <div v-if="showChatPanel" class="chat-panel">
+        <!-- 头部 -->
+        <div class="chat-header">
+          <h2>对话内容</h2>
+          <button class="icon-btn" @click="showChatPanel = false">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
             </svg>
           </button>
         </div>
         
-        <!-- 录音提示 -->
-        <div v-if="isRecording" class="recording-indicator">
-          <span class="recording-dot"></span>
-          <span>{{ recordingTime }}s</span>
+        <!-- 消息列表 -->
+        <div class="chat-content" ref="chatMessages">
+          <div v-for="(msg, index) in messages" :key="index" class="message-item">
+            <div class="message-row user" v-if="msg.type === 'user'">
+              <div class="message-avatar">👤</div>
+              <div class="message-bubble user">{{ msg.text }}</div>
+            </div>
+            <div class="message-row assistant" v-if="msg.type === 'assistant'">
+              <div class="message-avatar">🤖</div>
+              <div class="message-bubble assistant">{{ msg.text }}</div>
+            </div>
+            <div class="message-row system" v-if="msg.type === 'system'">
+              <div class="system-text">{{ msg.text }}</div>
+            </div>
+          </div>
+          
+          <div v-if="messages.length === 0" class="empty-state">
+            <div class="empty-icon">💬</div>
+            <p>开始和数字人对话吧</p>
+          </div>
+        </div>
+        
+        <!-- 底部输入区域 -->
+        <div class="chat-input-area">
+          <!-- 语音输入按钮 -->
+          <button 
+            class="voice-btn" 
+            :class="{ recording: isRecording }"
+            @mousedown="startVoiceInput"
+            @mouseup="stopVoiceInput"
+            @touchstart="startVoiceInput"
+            @touchend="stopVoiceInput"
+          >
+            <svg v-if="!isRecording" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+              <line x1="12" y1="19" x2="12" y2="23"></line>
+              <line x1="8" y1="23" x2="16" y2="23"></line>
+            </svg>
+            <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="6" y="4" width="4" height="16"></rect>
+              <rect x="14" y="4" width="4" height="16"></rect>
+            </svg>
+          </button>
+          
+          <!-- 文本输入 -->
+          <div class="text-input-wrapper">
+            <input
+              v-model="inputMessage"
+              type="text"
+              placeholder="输入消息或按住麦克风说话..."
+              @keyup.enter="sendMessage"
+              :disabled="isSending || isRecording"
+            />
+            <button class="send-btn" @click="sendMessage" :disabled="!inputMessage.trim() || isSending">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </transition>
+    
+    <!-- 展开对话按钮（当对话面板收起时显示） -->
+    <button v-if="!showChatPanel" class="expand-chat-btn" @click="showChatPanel = true">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
+      </svg>
+      <span class="unread-badge" v-if="unreadCount > 0">{{ unreadCount }}</span>
+    </button>
     
     <!-- 设置面板 -->
-    <transition name="slide-up">
+    <transition name="fade">
       <div v-if="showSettings" class="settings-modal" @click.self="showSettings = false">
         <div class="settings-content">
           <div class="settings-header">
@@ -210,7 +255,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, nextTick, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useChatStore } from '../store/chat'
 import { chatApi, videoApi } from '../api'
@@ -229,7 +274,12 @@ const isMuted = ref(false)
 const isPaused = ref(false)
 const savedVolume = ref(1)
 const showOverlay = ref(true)
+const showChatPanel = ref(true)
 const showSettings = ref(false)
+const unreadCount = ref(0)
+
+// 消息列表（本地管理，立即显示）
+const messages = ref([])
 
 // 语音输入
 const isRecording = ref(false)
@@ -265,9 +315,14 @@ const settings = reactive({
   useFaceCrop: false
 })
 
-// 获取头像URL
+// 获取头像URL - 直接使用相对路径，不走视频流API
 const getAvatarUrl = () => {
-  return videoApi.getVideoUrl(settings.condImage)
+  // 如果路径以 http 开头，直接使用
+  if (settings.condImage.startsWith('http')) {
+    return settings.condImage
+  }
+  // 否则使用相对路径，添加前缀避免缓存问题
+  return `/${settings.condImage}?t=${Date.now()}`
 }
 
 // 滚动到底部
@@ -282,6 +337,21 @@ const scrollToBottom = () => {
 // 切换控制栏显示
 const toggleControls = () => {
   showOverlay.value = !showOverlay.value
+}
+
+// 添加消息到本地列表
+const addMessage = (type, text) => {
+  messages.value.push({
+    type,
+    text,
+    time: new Date().toLocaleTimeString()
+  })
+  scrollToBottom()
+  
+  // 如果对话面板收起，增加未读计数
+  if (!showChatPanel.value && type === 'assistant') {
+    unreadCount.value++
+  }
 }
 
 // 语音输入
@@ -323,6 +393,7 @@ const stopVoiceInput = () => {
 
 const processVoiceInput = async (audioBlob) => {
   try {
+    // 这里可以调用语音识别API
     ElMessage.info('语音输入功能需要接入语音识别服务')
   } catch (error) {
     console.error('语音识别失败:', error)
@@ -593,10 +664,15 @@ const connectWebSocket = () => {
 
 const handleWebSocketMessage = (data) => {
   if (data.type === 'chat') {
+    // 添加用户消息
+    addMessage('user', data.data.user)
+    // 添加助手回复
+    addMessage('assistant', data.data.assistant)
+    // 同步到 store
     chatStore.addMessage(data.data.user, data.data.assistant)
-    scrollToBottom()
   } else if (data.type === 'error') {
     ElMessage.error(data.message)
+    addMessage('system', '错误: ' + data.message)
   } else if (data.type === 'video_segment') {
     if (data.path) addVideoSegment(data.path)
   }
@@ -625,18 +701,21 @@ const sendMessage = async () => {
   
   hasUserInteracted.value = true
   
+  // 立即显示用户消息
+  const userMessage = inputMessage.value
+  addMessage('user', userMessage)
+  
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     connectWebSocket()
     return
   }
   
   isSending.value = true
-  const message = inputMessage.value
   inputMessage.value = ''
   
   try {
     const response = await chatApi.sendMessage({
-      message,
+      message: userMessage,
       condImage: settings.condImage,
       ckptDir: settings.ckptDir,
       wav2vecDir: settings.wav2vecDir,
@@ -647,10 +726,18 @@ const sendMessage = async () => {
     chatStore.setSessionId(response.data.sessionId)
   } catch (error) {
     ElMessage.error('发送消息失败')
+    addMessage('system', '发送失败，请重试')
   } finally {
     isSending.value = false
   }
 }
+
+// 监听对话面板展开，重置未读计数
+watch(showChatPanel, (newVal) => {
+  if (newVal) {
+    unreadCount.value = 0
+  }
+})
 
 onMounted(() => {
   tempVideo = document.createElement('video')
@@ -673,27 +760,45 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* 左侧：1:1 视频区域 */
-.left-panel {
-  flex: 0 0 auto;
+/* 视频面板 */
+.video-panel {
+  flex: 1;
   height: 100%;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   padding: 20px;
   background: #000;
+  transition: all 0.3s ease;
+}
+
+.video-panel.centered {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
 }
 
 .video-wrapper {
   position: relative;
   width: calc(100vh - 40px);
   height: calc(100vh - 40px);
-  max-width: calc(100vw - 400px);
-  max-height: calc(100vw - 400px);
+  max-width: min(calc(100vw - 420px), calc(100vh - 40px));
+  max-height: min(calc(100vw - 420px), calc(100vh - 40px));
   background: #1a1a1a;
-  border-radius: 16px;
+  border-radius: 20px;
   overflow: hidden;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.video-panel.centered .video-wrapper {
+  width: calc(100vh - 40px);
+  height: calc(100vh - 40px);
+  max-width: min(calc(100vw - 40px), calc(100vh - 40px));
+  max-height: min(calc(100vw - 40px), calc(100vh - 40px));
 }
 
 .digital-human-video {
@@ -723,7 +828,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 16px;
+  padding: 20px;
   background: linear-gradient(
     to bottom,
     rgba(0, 0, 0, 0.5) 0%,
@@ -749,19 +854,20 @@ onUnmounted(() => {
 .user-info {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 .avatar {
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   overflow: hidden;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 20px;
+  font-size: 22px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
 }
 
 .avatar img {
@@ -772,7 +878,7 @@ onUnmounted(() => {
 
 .user-details h3 {
   color: white;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   margin: 0;
 }
@@ -780,9 +886,9 @@ onUnmounted(() => {
 .status {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   color: rgba(255, 255, 255, 0.7);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .status.online {
@@ -790,8 +896,8 @@ onUnmounted(() => {
 }
 
 .status-dot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: #ff6b6b;
 }
@@ -806,6 +912,11 @@ onUnmounted(() => {
   50% { opacity: 0.5; }
 }
 
+.top-actions {
+  display: flex;
+  gap: 8px;
+}
+
 /* 底部控制栏 */
 .bottom-controls {
   display: flex;
@@ -813,8 +924,8 @@ onUnmounted(() => {
 }
 
 .control-btn {
-  width: 44px;
-  height: 44px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   border: none;
   background: rgba(255, 255, 255, 0.15);
@@ -837,8 +948,8 @@ onUnmounted(() => {
 
 /* 图标按钮 */
 .icon-btn {
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   border: none;
   background: rgba(255, 255, 255, 0.1);
@@ -855,17 +966,118 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.2);
 }
 
-/* 右侧：文字内容区域 */
-.right-panel {
-  flex: 1;
+/* 浮动输入区（当对话面板收起时） */
+.floating-input-area {
+  position: absolute;
+  bottom: 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.voice-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s ease;
+}
+
+.voice-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.voice-btn.large {
+  width: 72px;
+  height: 72px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  box-shadow: 0 8px 24px rgba(102, 126, 234, 0.4);
+}
+
+.voice-btn.large:hover {
+  transform: scale(1.05);
+  box-shadow: 0 12px 32px rgba(102, 126, 234, 0.5);
+}
+
+.voice-btn.recording {
+  background: #ff4757;
+  animation: recording-pulse 1s infinite;
+}
+
+@keyframes recording-pulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255, 71, 87, 0.7); }
+  50% { transform: scale(1.05); box-shadow: 0 0 0 15px rgba(255, 71, 87, 0); }
+}
+
+.voice-hint {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 14px;
+}
+
+/* 展开对话按钮 */
+.expand-chat-btn {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 16px rgba(102, 126, 234, 0.4);
+  transition: all 0.3s ease;
+  z-index: 50;
+}
+
+.expand-chat-btn:hover {
+  transform: scale(1.1);
+  box-shadow: 0 6px 24px rgba(102, 126, 234, 0.5);
+}
+
+.unread-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: #ff4757;
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 对话面板 */
+.chat-panel {
+  width: 380px;
+  height: 100%;
   display: flex;
   flex-direction: column;
   background: #141414;
   border-left: 1px solid rgba(255, 255, 255, 0.1);
-  min-width: 360px;
+  flex-shrink: 0;
 }
 
 .chat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   padding: 16px 20px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
@@ -884,13 +1096,13 @@ onUnmounted(() => {
 }
 
 .message-item {
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .message-row {
   display: flex;
   gap: 10px;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
   align-items: flex-start;
 }
 
@@ -915,11 +1127,11 @@ onUnmounted(() => {
 }
 
 .message-bubble {
-  max-width: 70%;
-  padding: 12px 16px;
+  max-width: 75%;
+  padding: 10px 14px;
   border-radius: 16px;
   font-size: 14px;
-  line-height: 1.6;
+  line-height: 1.5;
   word-wrap: break-word;
 }
 
@@ -933,6 +1145,18 @@ onUnmounted(() => {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
   border-bottom-right-radius: 4px;
+}
+
+.message-row.system {
+  justify-content: center;
+}
+
+.system-text {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  padding: 4px 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
 }
 
 .empty-state {
@@ -961,35 +1185,6 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-}
-
-.voice-btn {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  border: none;
-  background: rgba(255, 255, 255, 0.1);
-  color: white;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.3s ease;
-  flex-shrink: 0;
-}
-
-.voice-btn:hover {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-.voice-btn.recording {
-  background: #ff4757;
-  animation: recording-pulse 1s infinite;
-}
-
-@keyframes recording-pulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.1); }
 }
 
 .text-input-wrapper {
@@ -1038,35 +1233,6 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
-/* 录音指示器 */
-.recording-indicator {
-  position: absolute;
-  bottom: 70px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: #ff4757;
-  font-size: 12px;
-  background: rgba(0, 0, 0, 0.8);
-  padding: 6px 12px;
-  border-radius: 12px;
-}
-
-.recording-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #ff4757;
-  animation: blink 1s infinite;
-}
-
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
-}
-
 /* 设置面板 */
 .settings-modal {
   position: fixed;
@@ -1084,10 +1250,10 @@ onUnmounted(() => {
 
 .settings-content {
   width: 100%;
-  max-width: 400px;
+  max-width: 420px;
   background: #1a1a1a;
-  border-radius: 16px;
-  padding: 20px;
+  border-radius: 20px;
+  padding: 24px;
   max-height: 80vh;
   overflow-y: auto;
 }
@@ -1096,7 +1262,7 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
+  margin-bottom: 24px;
 }
 
 .settings-header h3 {
@@ -1117,49 +1283,48 @@ onUnmounted(() => {
 }
 
 .settings-actions {
-  margin-top: 20px;
+  margin-top: 24px;
 }
 
 /* 动画 */
-.slide-up-enter-active,
-.slide-up-leave-active {
+.slide-enter-active,
+.slide-leave-active {
   transition: all 0.3s ease;
 }
 
-.slide-up-enter-from,
-.slide-up-leave-to {
+.slide-enter-from,
+.slide-leave-to {
+  transform: translateX(100%);
   opacity: 0;
 }
 
-.slide-up-enter-from .settings-content,
-.slide-up-leave-to .settings-content {
-  transform: scale(0.95);
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
 }
 
 /* 响应式 */
 @media (max-width: 900px) {
-  .video-chat-app {
-    flex-direction: column;
-  }
-  
-  .left-panel {
-    flex: 0 0 auto;
-    height: 50vh;
-    padding: 10px;
+  .chat-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    max-width: 400px;
+    z-index: 40;
   }
   
   .video-wrapper {
-    width: calc(50vh - 20px);
-    height: calc(50vh - 20px);
-    max-width: calc(100vw - 20px);
-    max-height: calc(100vw - 20px);
-  }
-  
-  .right-panel {
-    flex: 1;
-    min-width: auto;
-    border-left: none;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    width: calc(100vh - 180px);
+    height: calc(100vh - 180px);
+    max-width: min(calc(100vw - 40px), calc(100vh - 180px));
+    max-height: min(calc(100vw - 40px), calc(100vh - 180px));
   }
 }
 </style>
