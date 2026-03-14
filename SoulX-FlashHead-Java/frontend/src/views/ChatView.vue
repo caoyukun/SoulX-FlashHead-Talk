@@ -75,11 +75,10 @@
             class="digital-human-video"
             controls
             autoplay
-            muted
             playsinline
-            :key="currentVideoKey"
             @ended="handleVideoEnded"
             @error="handleVideoError"
+            @volumechange="handleVolumeChange"
           >
             <source :src="currentVideoUrl" type="video/mp4" />
             您的浏览器不支持视频播放。
@@ -139,9 +138,10 @@ const isInitializing = ref(false)
 const isDownloading = ref(false)
 const isConnected = ref(false)
 const currentVideoUrl = ref('')
-const currentVideoKey = ref(0)
 const videoQueue = ref([])
 const isPlaying = ref(false)
+const isMuted = ref(false)
+const savedVolume = ref(1)
 
 let ws = null
 
@@ -168,13 +168,14 @@ const playNextVideo = () => {
   if (videoQueue.value.length > 0) {
     const nextVideo = videoQueue.value.shift()
     currentVideoUrl.value = nextVideo
-    currentVideoKey.value += 1
     chatStore.setCurrentVideoUrl(nextVideo)
     isPlaying.value = true
     
     nextTick(() => {
       if (videoPlayer.value) {
-        videoPlayer.value.load()
+        videoPlayer.value.muted = isMuted.value
+        videoPlayer.value.volume = savedVolume.value
+        videoPlayer.value.src = currentVideoUrl.value
         videoPlayer.value.play().catch(e => {
           console.log('自动播放失败，等待用户交互:', e)
         })
@@ -182,6 +183,15 @@ const playNextVideo = () => {
     })
   } else {
     isPlaying.value = false
+  }
+}
+
+const handleVolumeChange = () => {
+  if (videoPlayer.value) {
+    isMuted.value = videoPlayer.value.muted
+    if (!isMuted.value) {
+      savedVolume.value = videoPlayer.value.volume
+    }
   }
 }
 
