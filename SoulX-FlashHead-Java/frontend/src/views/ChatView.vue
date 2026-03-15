@@ -585,6 +585,30 @@ const initHlsPlayer = async (hlsUrl) => {
       if (data.details && data.details.endList) {
         console.log('HLS: End list detected')
       }
+      // 动态更新总时长
+      if (data.details && data.details.fragments) {
+        let totalTime = 0
+        for (const frag of data.details.fragments) {
+          totalTime += frag.duration
+        }
+        if (totalTime > 0) {
+          totalDuration.value = totalTime
+        }
+      }
+    })
+
+    hls.on(Hls.Events.FRAG_LOADED, (event, data) => {
+      console.log('HLS: Fragment loaded, duration:', data.frag.duration)
+      // 片段加载后更新总时长
+      if (hls && hls.levels && hls.levels[0] && hls.levels[0].details && hls.levels[0].details.fragments) {
+        let totalTime = 0
+        for (const frag of hls.levels[0].details.fragments) {
+          totalTime += frag.duration
+        }
+        if (totalTime > 0) {
+          totalDuration.value = totalTime
+        }
+      }
     })
 
     hls.on(Hls.Events.MANIFEST_LOADED, (event, data) => {
@@ -681,7 +705,7 @@ const handleHlsError = (e) => {
 
 const handleHlsEnded = () => {
   console.log('HLS: Playback ended')
-  destroyHlsPlayer()
+  // 播放结束时请求下一个空闲视频，但保持当前播放器，等收到新的 hls_stream 消息时再切换
   playIdleVideo()
 }
 
