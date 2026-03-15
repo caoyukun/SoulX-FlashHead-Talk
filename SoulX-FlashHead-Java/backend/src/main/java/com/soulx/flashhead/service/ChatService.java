@@ -210,19 +210,39 @@ public class ChatService {
                                 continue;
                             }
                             
-                            // 使用流式回调生成空闲视频，逐段获取
                             String streamId = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
-                            log.info("开始流式生成空闲视频, streamId: {}", streamId);
+                            log.info("开始生成空闲视频, streamId: {}, useHls: {}", streamId, useHls);
                             
-                            // 首先设置回调 URL
-                            pythonServiceClient.setCallbackUrl("http://localhost:8080/api/callback/new-segment");
-                            
-                            // 调用 Python 服务生成空闲视频（使用流式回调）
-                            pythonServiceClient.generateIdleVideo(
-                                currentCondImage, currentCkptDir, currentWav2vecDir,
-                                currentModelType, currentSeed, currentUseFaceCrop, 15.0,
-                                true, streamId
-                            );
+                            if (useHls) {
+                                // 使用 HLS 方式生成空闲视频
+                                String backendUrl = "http://localhost:8080";
+                                
+                                // 预创建 HLS 会话
+                                hlsStreamService.createSession(streamId);
+                                
+                                // 推送 HLS 地址到前端
+                                String hlsUrl = backendUrl + "/api/hls/" + streamId + "/playlist.m3u8";
+                                Map<String, Object> hlsMsg = new HashMap<>();
+                                hlsMsg.put("type", "hls_stream");
+                                hlsMsg.put("hls_url", hlsUrl);
+                                hlsMsg.put("stream_id", streamId);
+                                webSocketHandler.broadcastMessage(hlsMsg);
+                                
+                                // 调用 Python 服务生成空闲视频
+                                pythonServiceClient.generateIdleVideoHls(
+                                    currentCondImage, currentCkptDir, currentWav2vecDir,
+                                    currentModelType, currentSeed, currentUseFaceCrop,
+                                    15.0, streamId, backendUrl
+                                );
+                            } else {
+                                // 使用原有流式回调方式
+                                pythonServiceClient.setCallbackUrl("http://localhost:8080/api/callback/new-segment");
+                                pythonServiceClient.generateIdleVideo(
+                                    currentCondImage, currentCkptDir, currentWav2vecDir,
+                                    currentModelType, currentSeed, currentUseFaceCrop, 15.0,
+                                    true, streamId
+                                );
+                            }
                             
                             // 等待空闲视频生成完成
                             while (!idleVideoGenerationComplete.get() && 
