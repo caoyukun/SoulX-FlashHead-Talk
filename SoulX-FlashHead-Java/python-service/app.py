@@ -293,18 +293,32 @@ def _generate_hls_video_internal(audio_path, cond_image, ckpt_dir, wav2vec_dir, 
                 hls_gen.write_video_frame(frame)
                 total_frames += 1
         
-        logger.info(f"[队列任务] 所有视频帧生成完成，总共 {total_frames} 帧")
+        logger.info(f"[队列任务] 所有视频帧生成完成，总共 {total_frames} 帧, 预期片段数: {total_chunks}")
         
         # 关闭视频输入
         if video_input:
             video_input.close()
         
-        # 等待片段上传完成
-        logger.info("[队列任务] 等待 5 秒让片段上传完成...")
-        time.sleep(5)
-        
+        # 通知后端视频生成完成，告知预期的片段数量
+        logger.info(f"[队列任务] 通知后端视频生成完成，预期片段数: {total_chunks}, 起始序号: {start_sequence}")
+        try:
+            complete_url = f"{backend_url}/api/callback/generation-complete"
+            response = requests.post(
+                complete_url,
+                json={
+                    "stream_id": stream_id,
+                    "segment_count": total_chunks,
+                    "start_sequence": start_sequence,
+                    "total_frames": total_frames
+                },
+                timeout=10
+            )
+            logger.info(f"[队列任务] 通知后端视频生成完成, 状态: {response.status_code}, 预期片段数: {total_chunks}")
+        except Exception as e:
+            logger.warning(f"[队列任务] 通知后端生成完成失败: {e}")
+    
     finally:
-        hls_gen.stop()
+        pass  # 不调用 hls_gen.stop()，保持会话持续
     
     hls_url = f"{backend_url}/api/hls/{stream_id}/playlist.m3u8"
     logger.info(f"[队列任务] HLS 视频生成完成: {hls_url}")
@@ -370,13 +384,17 @@ def _generate_hls_idle_internal(duration, cond_image, ckpt_dir, wav2vec_dir, mod
             [silent_audio, np.zeros(pad_length, dtype=silent_audio.dtype)]
         )
     human_speech_array_slices = silent_audio.reshape(-1, human_speech_array_slice_len)
+    total_chunks = len(human_speech_array_slices)
     
-    if len(human_speech_array_slices) == 0:
+    if total_chunks == 0:
         raise ValueError("音频太短")
     
-    # 创建临时音频文件
-    temp_dir = tempfile.mkdtemp()
-    audio_path = os.path.join(temp_dir, "silent.wav")
+    logger.info(f"[队列任务] 空闲视频预期片段数: {total_chunks}, 起始序号: {start_sequence}")
+    
+    # 在 session_id 目录下创建音频文件
+    session_temp_dir = os.path.join("/home/yukun/SoulX-FlashHead/chat_results", stream_id, "audio")
+    os.makedirs(session_temp_dir, exist_ok=True)
+    audio_path = os.path.join(session_temp_dir, "silent.wav")
     _save_chunk_audio_to_wav(silent_audio, audio_path, sample_rate)
     
     # 创建 HLS 生成器
@@ -409,20 +427,34 @@ def _generate_hls_idle_internal(duration, cond_image, ckpt_dir, wav2vec_dir, mod
                 frame = chunk_frames_np[i]
                 hls_gen.write_video_frame(frame)
         
+        logger.info(f"[队列任务] 空闲视频所有帧生成完成，预期片段数: {total_chunks}")
+        
         # 关闭视频输入
         if video_input:
             video_input.close()
         
-        logger.info("[队列任务] 等待 5 秒让片段上传完成...")
-        time.sleep(5)
+        # 通知后端视频生成完成，告知预期的片段数量
+        logger.info(f"[队列任务] 通知后端空闲视频生成完成，预期片段数: {total_chunks}, 起始序号: {start_sequence}")
+        try:
+            complete_url = f"{backend_url}/api/callback/generation-complete"
+            response = requests.post(
+                complete_url,
+                json={
+                    "stream_id": stream_id,
+                    "segment_count": total_chunks,
+                    "start_sequence": start_sequence,
+                    "video_type": "idle"
+                },
+                timeout=10
+            )
+            logger.info(f"[队列任务] 通知后端空闲视频生成完成, 状态: {response.status_code}, 预期片段数: {total_chunks}")
+        except Exception as e:
+            logger.warning(f"[队列任务] 通知后端空闲视频生成完成失败: {e}")
         
     finally:
-        hls_gen.stop()
-        # 清理临时文件
-        try:
-            shutil.rmtree(temp_dir)
-        except:
-            pass
+        # 不调用 hls_gen.stop()，保持会话持续
+        # 不清理 session 目录下的文件，保持文件
+        pass
     
     hls_url = f"{backend_url}/api/hls/{stream_id}/playlist.m3u8"
     logger.info(f"[队列任务] HLS 空闲视频生成完成: {hls_url}")
@@ -588,8 +620,10 @@ def tts():
         if not text:
             return jsonify({"error": "文本不能为空"}), 400
         
-        temp_dir = tempfile.mkdtemp()
-        output_path = os.path.join(temp_dir, "tts_audio.mp3")
+        # 使用通用目录存放 TTS 音频
+        tts_temp_dir = os.path.join("/home/yukun/SoulX-FlashHead/chat_results", "tts")
+        os.makedirs(tts_temp_dir, exist_ok=True)
+        output_path = os.path.join(tts_temp_dir, "tts_audio.mp3")
         
         wav_path = text_to_speech_free(text, output_path)
         
@@ -1025,8 +1059,10 @@ def generate_idle_video():
             })
         
         # 非流式模式，生成完整视频
-        temp_dir = tempfile.mkdtemp()
-        silent_audio_path = os.path.join(temp_dir, "silent.wav")
+        # 在 session_id 目录下创建音频文件
+        session_temp_dir = os.path.join("/home/yukun/SoulX-FlashHead/chat_results", stream_id, "audio")
+        os.makedirs(session_temp_dir, exist_ok=True)
+        silent_audio_path = os.path.join(session_temp_dir, "silent.wav")
         _save_chunk_audio_to_wav(create_silent_audio(duration=duration), silent_audio_path, sample_rate)
         
         idle_video_path = os.path.join(stream_dir, f"idle_{timestamp}.mp4")

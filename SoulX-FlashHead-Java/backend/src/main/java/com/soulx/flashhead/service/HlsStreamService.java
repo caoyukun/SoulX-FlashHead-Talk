@@ -4,7 +4,12 @@ import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,7 +25,9 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class HlsStreamService {
 
-    // 会话ID -> HLS 会话
+    private static final String BASE_DIR = "/home/yukun/SoulX-FlashHead/chat_results";
+
+    // 会话ID -> HLS 会话（保留用于会话管理，但不存储片段数据）
     private final Map<String, HlsSession> sessions = new ConcurrentHashMap<>();
 
     // 清理过期会话的调度器
@@ -121,8 +128,6 @@ public class HlsStreamService {
      * 生成 M3U8 播放列表
      */
     public String generatePlaylist(String sessionId) {
-        log.info("生成播放列表: sessionId={}", sessionId);
-
         HlsSession session = getSession(sessionId);
         if (session == null) {
             log.warn("生成播放列表失败: 会话不存在, sessionId={}", sessionId);
@@ -194,29 +199,101 @@ public class HlsStreamService {
     }
 
     /**
-     * 获取下一个可用的序列号
+     * 获取下一个可用的序列号 - 直接从文件系统读取
      */
     public int getNextSequenceNumber(String sessionId) {
-        HlsSession session = getSession(sessionId);
-        if (session == null || session.getSegments().isEmpty()) {
+        Path hlsDir = Paths.get(BASE_DIR, sessionId, "hls");
+        
+        if (!Files.exists(hlsDir)) {
+            log.debug("HLS 目录不存在，返回 0: sessionId={}", sessionId);
             return 0;
         }
-        // 获取最后一个片段的序列号并加 1
-        TsSegment lastSegment = session.getSegments().get(session.getSegments().size() - 1);
-        return lastSegment.getSequenceNumber() + 1;
+        
+        File[] tsFiles = hlsDir.toFile().listFiles((dir, name) -> name.startsWith("segment_") && name.endsWith(".ts"));
+        
+        if (tsFiles == null || tsFiles.length == 0) {
+            log.debug("没有找到 TS 文件，返回 0: sessionId={}", sessionId);
+            return 0;
+        }
+        
+        // 找到最大的序列号
+        int maxSequence = 0;
+        for (File file : tsFiles) {
+            try {
+                String name = file.getName();
+                int startIndex = name.indexOf("segment_") + 8;
+                int endIndex = name.indexOf(".ts");
+                int seq = Integer.parseInt(name.substring(startIndex, endIndex));
+                if (seq > maxSequence) {
+                    maxSequence = seq;
+                }
+            } catch (Exception e) {
+                log.warn("解析文件名失败: {}", file.getName());
+            }
+        }
+        
+        log.debug("获取下一个序列号: sessionId={}, max={}, next={}", sessionId, maxSequence, maxSequence + 1);
+        return maxSequence + 1;
     }
 
     /**
-     * 获取会话中的片段数量
+     * 获取会话中的片段数量 - 直接从文件系统读取
      */
     public int getSegmentCount(String sessionId) {
-        HlsSession session = getSession(sessionId);
-        if (session == null) {
+        Path hlsDir = Paths.get(BASE_DIR, sessionId, "hls");
+        
+        if (!Files.exists(hlsDir)) {
+            log.debug("HLS 目录不存在，返回 0: sessionId={}", sessionId);
             return 0;
         }
-        synchronized (session) {
-            return session.getSegments().size();
+        
+        File[] tsFiles = hlsDir.toFile().listFiles((dir, name) -> name.startsWith("segment_") && name.endsWith(".ts"));
+        
+        if (tsFiles == null) {
+            log.debug("无法列出 TS 文件，返回 0: sessionId={}", sessionId);
+            return 0;
         }
+        
+        log.debug("获取片段数量: sessionId={}, count={}", sessionId, tsFiles.length);
+        return tsFiles.length;
+    }
+    
+    /**
+     * 获取当前最大的序列号 - 直接从文件系统读取
+     */
+    public int getMaxSequenceNumber(String sessionId) {
+        Path hlsDir = Paths.get(BASE_DIR, sessionId, "hls");
+        
+        if (!Files.exists(hlsDir)) {
+            log.debug("HLS 目录不存在，返回 -1: sessionId={}", sessionId);
+            return -1;
+        }
+        
+        File[] tsFiles = hlsDir.toFile().listFiles((dir, name) -> name.startsWith("segment_") && name.endsWith(".ts"));
+        
+        if (tsFiles == null || tsFiles.length == 0) {
+            log.debug("没有找到 TS 文件，返回 -1: sessionId={}", sessionId);
+            return -1;
+        }
+        
+        // 找到最大的序列号
+        int maxSequence = -1;
+        for (File file : tsFiles) {
+            try {
+                String name = file.getName();
+                int startIndex = name.indexOf("segment_") + 8;
+                int endIndex = name.indexOf(".ts");
+                int seq = Integer.parseInt(name.substring(startIndex, endIndex));
+                if (seq > maxSequence) {
+                    maxSequence = seq;
+                }
+            } catch (Exception e) {
+                log.warn("解析文件名失败: {}", file.getName());
+            }
+        }
+        
+        log.debug("获取最大序列号: sessionId={}, max={}", sessionId, maxSequence);
+        return maxSequence;
     }
 
     /**

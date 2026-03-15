@@ -37,9 +37,15 @@ public class VideoCallbackController {
     
     @PostMapping("/generation-complete")
     public Map<String, Object> handleGenerationComplete(@RequestBody(required = false) Map<String, Object> data) {
-        log.info("收到视频生成完成回调");
+        log.info("收到视频生成完成回调: {}", data);
+        
         String finalVideo = data != null ? (String) data.get("final_video") : null;
-        chatService.onVideoGenerationComplete(finalVideo);
+        String streamId = data != null ? (String) data.get("stream_id") : null;
+        Integer segmentCount = data != null ? (Integer) data.get("segment_count") : null;
+        Integer startSequence = data != null ? (Integer) data.get("start_sequence") : null;
+        String videoType = data != null ? (String) data.get("video_type") : null;
+        
+        chatService.onVideoGenerationComplete(finalVideo, streamId, segmentCount, startSequence, videoType);
         
         Map<String, Object> result = new HashMap<>();
         result.put("status", "success");

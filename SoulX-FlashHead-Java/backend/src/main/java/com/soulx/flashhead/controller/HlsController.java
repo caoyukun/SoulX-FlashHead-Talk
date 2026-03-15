@@ -1,6 +1,5 @@
 package com.soulx.flashhead.controller;
 
-import com.soulx.flashhead.service.HlsStreamService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
@@ -8,6 +7,11 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -20,39 +24,56 @@ import java.util.concurrent.TimeUnit;
 @CrossOrigin(origins = "*")
 public class HlsController {
 
-    private final HlsStreamService hlsStreamService;
-
-    public HlsController(HlsStreamService hlsStreamService) {
-        this.hlsStreamService = hlsStreamService;
-    }
+    private static final String BASE_DIR = "/home/yukun/SoulX-FlashHead/chat_results";
 
     /**
-     * 获取 M3U8 播放列表
+     * 获取 M3U8 播放列表 - 直接读取 Python 生成的文件
      */
     @GetMapping(value = "/{sessionId}/playlist.m3u8", produces = "application/vnd.apple.mpegurl")
     public ResponseEntity<String> getPlaylist(@PathVariable String sessionId) {
         log.debug("获取 HLS 播放列表: {}", sessionId);
 
-        String playlist = hlsStreamService.generatePlaylist(sessionId);
+        Path playlistPath = Paths.get(BASE_DIR, sessionId, "hls", "playlist.m3u8");
 
-        if (playlist == null) {
-            log.warn("HLS 会话不存在: {}", sessionId);
-            return ResponseEntity.notFound().build();
+        if (!Files.exists(playlistPath)) {
+            log.info("playlist.m3u8 不存在，返回最小有效 M3U8: sessionId={}", sessionId);
+            
+            // 返回最小的有效 M3U8 播放列表
+            String minimalPlaylist = "#EXTM3U\n" +
+                    "#EXT-X-VERSION:3\n" +
+                    "#EXT-X-TARGETDURATION:10\n" +
+                    "#EXT-X-MEDIA-SEQUENCE:0\n";
+            
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.parseMediaType("application/vnd.apple.mpegurl"));
+            headers.setCacheControl(CacheControl.noCache());
+            headers.setPragma("no-cache");
+            
+            return ResponseEntity.ok()
+                    .headers(headers)
+                    .body(minimalPlaylist);
         }
 
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.parseMediaType("application/vnd.apple.mpegurl"));
-        // 禁用缓存，确保播放器获取最新播放列表
-        headers.setCacheControl(CacheControl.noCache());
-        headers.setPragma("no-cache");
+        try {
+            String playlistContent = Files.readString(playlistPath);
+            log.debug("读取 playlist.m3u8 成功: sessionId={}, size={} bytes", sessionId, playlistContent.length());
 
-        return ResponseEntity.ok()
-                .headers(headers)
-                .body(playlist);
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.parseMediaType("application/vnd.apple.mpegurl"));
+            headers.setCacheControl(CacheControl.noCache());
+            headers.setPragma("no-cache");
+
+            return ResponseEntity.ok()
+                    .headers(headers)
+                    .body(playlistContent);
+        } catch (IOException e) {
+            log.error("读取 playlist.m3u8 失败: sessionId={}, error={}", sessionId, e.getMessage());
+            return ResponseEntity.internalServerError().build();
+        }
     }
 
     /**
-     * 获取 TS 片段
+     * 获取 TS 片段 - 直接从文件系统读取
      * 支持两种格式：
      * 1. /{sessionId}/segment_{sequence}.ts
      * 2. /{sessionId}/{sequence}.ts
@@ -62,34 +83,35 @@ public class HlsController {
             @PathVariable String sessionId,
             @PathVariable String segmentName) {
 
-        // 解析序列号
-        int sequenceNumber = parseSequenceNumber(segmentName);
-        if (sequenceNumber < 0) {
-            log.warn("无效的 TS 片段名称: {}", segmentName);
-            return ResponseEntity.badRequest().build();
-        }
+        // 直接从文件名构造路径
+        String tsFileName = segmentName + ".ts";
+        Path tsPath = Paths.get(BASE_DIR, sessionId, "hls", tsFileName);
 
-        log.debug("获取 TS 片段: sessionId={}, sequence={}", sessionId, sequenceNumber);
+        log.debug("获取 TS 片段: sessionId={}, file={}", sessionId, tsFileName);
 
-        byte[] data = hlsStreamService.getSegmentData(sessionId, sequenceNumber);
-
-        if (data == null) {
-            log.warn("TS 片段不存在: sessionId={}, sequence={}", sessionId, sequenceNumber);
+        if (!Files.exists(tsPath)) {
+            log.warn("TS 片段不存在: sessionId={}, file={}", sessionId, tsFileName);
             return ResponseEntity.notFound().build();
         }
 
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.parseMediaType("video/mp2t"));
-        // TS 片段可以缓存较长时间
-        headers.setCacheControl(CacheControl.maxAge(1, TimeUnit.HOURS));
+        try {
+            byte[] data = Files.readAllBytes(tsPath);
+            
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.parseMediaType("video/mp2t"));
+            headers.setCacheControl(CacheControl.maxAge(1, TimeUnit.HOURS));
 
-        return ResponseEntity.ok()
-                .headers(headers)
-                .body(data);
+            return ResponseEntity.ok()
+                    .headers(headers)
+                    .body(data);
+        } catch (IOException e) {
+            log.error("读取 TS 片段失败: sessionId={}, file={}, error={}", sessionId, tsFileName, e.getMessage());
+            return ResponseEntity.internalServerError().build();
+        }
     }
 
     /**
-     * 接收 FFmpeg 推送的 TS 片段（内部接口）
+     * 接收 TS 片段上传（内部接口，供 Python 调用）
      */
     @PostMapping(value = "/{sessionId}/segment", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
     public ResponseEntity<Void> uploadSegment(
@@ -98,62 +120,12 @@ public class HlsController {
             @RequestParam("duration") double duration,
             @RequestBody byte[] tsData) {
 
-        log.debug("接收 TS 片段: sessionId={}, sequence={}, duration={}, size={}KB",
+        log.debug("接收 TS 片段上传: sessionId={}, sequence={}, duration={}, size={}KB",
                 sessionId, sequenceNumber, duration, tsData.length / 1024);
 
-        hlsStreamService.addSegment(sessionId, sequenceNumber, duration, tsData);
+        // TS 文件已由 Python 直接写入文件系统，这里只记录日志即可
+        // Java 后端直接从文件系统读取文件提供给前端
 
         return ResponseEntity.ok().build();
-    }
-
-    /**
-     * 结束 HLS 流
-     */
-    @PostMapping("/{sessionId}/end")
-    public ResponseEntity<Void> endStream(@PathVariable String sessionId) {
-        log.info("结束 HLS 流: {}", sessionId);
-
-        hlsStreamService.endSession(sessionId);
-
-        return ResponseEntity.ok().build();
-    }
-
-    /**
-     * 创建 HLS 会话（可选，用于预创建会话）
-     */
-    @PostMapping("/{sessionId}/create")
-    public ResponseEntity<Void> createSession(@PathVariable String sessionId) {
-        log.info("创建 HLS 会话: {}", sessionId);
-
-        hlsStreamService.createSession(sessionId);
-
-        return ResponseEntity.ok().build();
-    }
-
-    /**
-     * 解析 TS 片段名称中的序列号
-     */
-    private int parseSequenceNumber(String segmentName) {
-        try {
-            // 处理 segment_00001.ts 格式
-            if (segmentName.startsWith("segment_")) {
-                String numberPart = segmentName.substring(8); // 去掉 "segment_"
-                if (numberPart.contains(".")) {
-                    numberPart = numberPart.substring(0, numberPart.indexOf('.'));
-                }
-                return Integer.parseInt(numberPart);
-            }
-
-            // 处理 00001.ts 格式
-            if (segmentName.contains(".")) {
-                String numberPart = segmentName.substring(0, segmentName.indexOf('.'));
-                return Integer.parseInt(numberPart);
-            }
-
-            // 纯数字格式
-            return Integer.parseInt(segmentName);
-        } catch (NumberFormatException e) {
-            return -1;
-        }
     }
 }

@@ -56,6 +56,11 @@ public class ChatService {
     private volatile boolean useHls = true; // 默认启用 HLS
     private String currentHlsSessionId = null;
     private int currentHlsSequenceNumber = 0; // 全局序列号追踪
+    
+    // 跟踪预期片段数量
+    private volatile int expectedSegmentCount = 0;  // 预期收到的片段数量
+    private volatile int expectedStartSequence = 0; // 预期起始序列号
+    private volatile String currentVideoType = null; // 当前视频类型
 
     public ChatService(VolcengineClient volcengineClient,
                        PythonServiceClient pythonServiceClient,
@@ -210,33 +215,31 @@ public class ChatService {
                         log.info("开始生成空闲视频, streamId: {}, useHls: {}, 当前片段数: {}", 
                                 currentHlsSessionId, useHls, currentSegmentCount);
                         
-                        if (useHls) {
-                            // 使用 HLS 方式生成空闲视频
-                            String backendUrl = "http://localhost:8080";
-                            
-                            // 推送 HLS 地址到前端（仅第一次推送）
-                            if (currentHlsSequenceNumber == 0) {
-                                String hlsUrl = backendUrl + "/api/hls/" + currentHlsSessionId + "/playlist.m3u8";
-                                Map<String, Object> hlsMsg = new HashMap<>();
-                                hlsMsg.put("type", "hls_stream");
-                                hlsMsg.put("hls_url", hlsUrl);
-                                hlsMsg.put("stream_id", currentHlsSessionId);
-                                webSocketHandler.broadcastMessage(hlsMsg);
-                            }
-                            
-                            // 获取下一个序列号
-                            int nextSequence = hlsStreamService.getNextSequenceNumber(currentHlsSessionId);
-                            log.info("下一个序列号: {}", nextSequence);
-                            
-                            // 调用 Python 服务生成空闲视频（异步，立即返回）
-                            pythonServiceClient.generateIdleVideoHls(
-                                currentCondImage, currentCkptDir, currentWav2vecDir,
-                                currentModelType, currentSeed, currentUseFaceCrop,
-                                15.0, currentHlsSessionId, backendUrl, nextSequence
-                            );
-                            
-                            log.info("空闲视频生成任务已提交到 Python 队列");
+                        // 使用 HLS 方式生成空闲视频
+                        String backendUrl = "http://localhost:8080";
+                        
+                        // 推送 HLS 地址到前端（仅第一次推送）
+                        if (currentHlsSequenceNumber == 0) {
+                            String hlsUrl = backendUrl + "/api/hls/" + currentHlsSessionId + "/playlist.m3u8";
+                            Map<String, Object> hlsMsg = new HashMap<>();
+                            hlsMsg.put("type", "hls_stream");
+                            hlsMsg.put("hls_url", hlsUrl);
+                            hlsMsg.put("stream_id", currentHlsSessionId);
+                            webSocketHandler.broadcastMessage(hlsMsg);
                         }
+                        
+                        // 获取下一个序列号
+                        int nextSequence = hlsStreamService.getNextSequenceNumber(currentHlsSessionId);
+                        log.info("下一个序列号: {}", nextSequence);
+                        
+                        // 调用 Python 服务生成空闲视频（异步，立即返回）
+                        pythonServiceClient.generateIdleVideoHls(
+                            currentCondImage, currentCkptDir, currentWav2vecDir,
+                            currentModelType, currentSeed, currentUseFaceCrop,
+                            15.0, currentHlsSessionId, backendUrl, nextSequence
+                        );
+                        
+                        log.info("空闲视频生成任务已提交到 Python 队列");
                     }
                 } catch (Exception e) {
                     log.error("生成空闲视频失败", e);
@@ -285,13 +288,24 @@ public class ChatService {
         }
     }
     
-    public void onVideoGenerationComplete(String finalVideoPath) {
-        log.info("视频生成完成");
+    public void onVideoGenerationComplete(String finalVideoPath, String streamId, 
+                                          Integer segmentCount, Integer startSequence, String videoType) {
+        log.info("视频生成完成回调: streamId={}, segmentCount={}, startSequence={}, videoType={}", 
+                streamId, segmentCount, startSequence, videoType);
         
         // 保存完整视频路径（如果是回复视频）
         if (hasPendingReply.get() && finalVideoPath != null) {
             currentFinalVideoPath = finalVideoPath;
             log.info("保存完整回复视频路径: {}", finalVideoPath);
+        }
+        
+        // 记录预期片段信息
+        if (segmentCount != null) {
+            this.expectedSegmentCount = segmentCount;
+            this.expectedStartSequence = startSequence != null ? startSequence : 0;
+            this.currentVideoType = videoType;
+            log.info("设置预期片段: count={}, startSequence={}, type={}", 
+                    expectedSegmentCount, expectedStartSequence, currentVideoType);
         }
         
         // 检查是否是回复视频完成
@@ -302,17 +316,75 @@ public class ChatService {
             
             // 重新开始生成空闲视频
             hasReceivedFirstReply.set(false);
-            idleVideoGenerationComplete.set(false);
+            startIdleVideoGeneration();
             log.info("回复视频生成完成，重新开始生成空闲视频");
         } else {
-            // 空闲视频生成完成
-            idleVideoGenerationComplete.set(true);
-            log.info("空闲视频生成完成");
+            // 空闲视频生成完成 - 等待所有片段上传完成后再开始下一个
+            isGeneratingIdle.set(false);
+            
+            // 检查是否所有预期片段都已收到
+            if (expectedSegmentCount > 0) {
+                int maxSequence = hlsStreamService.getMaxSequenceNumber(currentHlsSessionId);
+                int expectedEndSequence = expectedStartSequence + expectedSegmentCount - 1; // 序列从0开始，所以减1
+                log.info("检查片段上传进度: maxSequence={}, expectedEndSequence={}", maxSequence, expectedEndSequence);
+                
+                if (maxSequence >= expectedEndSequence) {
+                    log.info("所有预期片段已上传，开始生成下一个空闲视频");
+                    startIdleVideoGeneration();
+                } else {
+                    log.info("等待更多片段上传: maxSequence={}, expectedEndSequence={}", maxSequence, expectedEndSequence);
+                    // 启动一个检查线程，等待片段上传完成
+                    startSegmentCheckThread(expectedEndSequence);
+                }
+            } else {
+                // 没有预期片段信息，直接开始下一个
+                log.info("没有预期片段信息，直接开始生成下一个空闲视频");
+                startIdleVideoGeneration();
+            }
         }
     }
     
+    /**
+     * 启动线程检查片段上传进度
+     */
+    private void startSegmentCheckThread(int expectedEndSequence) {
+        Thread checkThread = new Thread(() -> {
+            int checkCount = 0;
+            int maxChecks = 60; // 最多检查60次（60秒）
+            
+            while (checkCount < maxChecks && !hasPendingReply.get()) {
+                try {
+                    Thread.sleep(1000); // 每秒检查一次
+                    checkCount++;
+                    
+                    int maxSequence = hlsStreamService.getMaxSequenceNumber(currentHlsSessionId);
+                    log.debug("检查片段上传进度 [{}/{}]: maxSequence={}, expectedEndSequence={}", 
+                            checkCount, maxChecks, maxSequence, expectedEndSequence);
+                    
+                    if (maxSequence >= expectedEndSequence) {
+                        log.info("所有预期片段已上传完成，开始生成下一个空闲视频");
+                        startIdleVideoGeneration();
+                        return;
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.warn("片段检查线程被中断");
+                    return;
+                }
+            }
+            
+            if (checkCount >= maxChecks) {
+                log.warn("等待片段上传超时，强制开始生成下一个空闲视频");
+                startIdleVideoGeneration();
+            }
+        });
+        checkThread.setDaemon(true);
+        checkThread.setName("SegmentCheckThread-" + System.currentTimeMillis());
+        checkThread.start();
+    }
+    
     public void onVideoGenerationComplete() {
-        onVideoGenerationComplete(null);
+        onVideoGenerationComplete(null, null, null, null, null);
     }
     
     public void processChatMessage(String userMessage, String sessionId) {
