@@ -55,6 +55,7 @@ public class ChatService {
     // HLS 相关
     private volatile boolean useHls = true; // 默认启用 HLS
     private String currentHlsSessionId = null;
+    private int currentHlsSequenceNumber = 0; // 全局序列号追踪
 
     public ChatService(VolcengineClient volcengineClient,
                        PythonServiceClient pythonServiceClient,
@@ -188,85 +189,60 @@ public class ChatService {
         
         idleVideoThread = new Thread(() -> {
             log.info("开始持续生成空闲视频");
-            while (!Thread.currentThread().isInterrupted()) {
+            if (!Thread.currentThread().isInterrupted()) {
                 try {
-                    // 只有在没有pending回复且没有收到第一个回复视频时才生成空闲视频
-                    if (hasReceivedFirstReply.get() || hasPendingReply.get()) {
-                        Thread.sleep(100);
-                        continue;
+                    // 只有在没有pending回复时才生成空闲视频
+                    if (hasPendingReply.get()) {
+                        return;
                     }
                     
-                    // 如果空闲视频生成已完成，等待一会儿再重新开始
-                    if (idleVideoGenerationComplete.get()) {
-                        Thread.sleep(1000);
-                        idleVideoGenerationComplete.set(false);
-                    }
+                    // 检查当前片段数量，用于日志记录
+                    int currentSegmentCount = hlsStreamService.getSegmentCount(currentHlsSessionId);
+                    log.debug("当前 playlist 片段数量: {}", currentSegmentCount);
                     
                     if (isGeneratingIdle.compareAndSet(false, true)) {
-                        try {
-                            // 再次检查状态，避免在检查后状态变化
-                            if (hasReceivedFirstReply.get() || hasPendingReply.get()) {
-                                log.info("状态已变化，跳过本次空闲视频生成");
-                                continue;
-                            }
+                        // 再次检查状态，避免在检查后状态变化
+                        if ( hasPendingReply.get()) {
+                            log.info("状态已变化，跳过本次空闲视频生成");
+                            return;
+                        }
+                        
+                        log.info("开始生成空闲视频, streamId: {}, useHls: {}, 当前片段数: {}", 
+                                currentHlsSessionId, useHls, currentSegmentCount);
+                        
+                        if (useHls) {
+                            // 使用 HLS 方式生成空闲视频
+                            String backendUrl = "http://localhost:8080";
                             
-                            String streamId = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
-                            log.info("开始生成空闲视频, streamId: {}, useHls: {}", streamId, useHls);
-                            
-                            if (useHls) {
-                                // 使用 HLS 方式生成空闲视频
-                                String backendUrl = "http://localhost:8080";
-                                
-                                // 预创建 HLS 会话
-                                hlsStreamService.createSession(streamId);
-                                
-                                // 推送 HLS 地址到前端
-                                String hlsUrl = backendUrl + "/api/hls/" + streamId + "/playlist.m3u8";
+                            // 推送 HLS 地址到前端（仅第一次推送）
+                            if (currentHlsSequenceNumber == 0) {
+                                String hlsUrl = backendUrl + "/api/hls/" + currentHlsSessionId + "/playlist.m3u8";
                                 Map<String, Object> hlsMsg = new HashMap<>();
                                 hlsMsg.put("type", "hls_stream");
                                 hlsMsg.put("hls_url", hlsUrl);
-                                hlsMsg.put("stream_id", streamId);
+                                hlsMsg.put("stream_id", currentHlsSessionId);
                                 webSocketHandler.broadcastMessage(hlsMsg);
-                                
-                                // 调用 Python 服务生成空闲视频
-                                pythonServiceClient.generateIdleVideoHls(
-                                    currentCondImage, currentCkptDir, currentWav2vecDir,
-                                    currentModelType, currentSeed, currentUseFaceCrop,
-                                    15.0, streamId, backendUrl
-                                );
-                            } else {
-                                // 使用原有流式回调方式
-                                pythonServiceClient.setCallbackUrl("http://localhost:8080/api/callback/new-segment");
-                                pythonServiceClient.generateIdleVideo(
-                                    currentCondImage, currentCkptDir, currentWav2vecDir,
-                                    currentModelType, currentSeed, currentUseFaceCrop, 15.0,
-                                    true, streamId
-                                );
                             }
                             
-                            // 等待空闲视频生成完成
-                            while (!idleVideoGenerationComplete.get() && 
-                                   !hasReceivedFirstReply.get() && 
-                                   !hasPendingReply.get()) {
-                                Thread.sleep(100);
-                            }
+                            // 获取下一个序列号
+                            int nextSequence = hlsStreamService.getNextSequenceNumber(currentHlsSessionId);
+                            log.info("下一个序列号: {}", nextSequence);
                             
-                            log.info("空闲视频生成流程完成");
-                        } finally {
-                            isGeneratingIdle.set(false);
+                            // 调用 Python 服务生成空闲视频（异步，立即返回）
+                            pythonServiceClient.generateIdleVideoHls(
+                                currentCondImage, currentCkptDir, currentWav2vecDir,
+                                currentModelType, currentSeed, currentUseFaceCrop,
+                                15.0, currentHlsSessionId, backendUrl, nextSequence
+                            );
+                            
+                            log.info("空闲视频生成任务已提交到 Python 队列");
                         }
                     }
                 } catch (Exception e) {
                     log.error("生成空闲视频失败", e);
-                    try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
                 }
             }
-            log.info("停止生成空闲视频");
+            log.info("生成空闲视频完成");
         });
         idleVideoThread.setDaemon(true);
         idleVideoThread.start();
@@ -370,39 +346,40 @@ public class ChatService {
                 File audioFile = pythonServiceClient.textToSpeech(assistantMessage);
                 currentAudioFile = audioFile;
 
-                String streamId = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
-
                 if (useHls) {
                     // 使用 HLS 流式生成
-                    log.info("使用 HLS 流式生成视频, streamId: {}", streamId);
-
-                    // 预创建 HLS 会话，这样前端请求时会话已经存在
-                    hlsStreamService.createSession(streamId);
-                    log.info("预创建 HLS 会话: {}", streamId);
+                    log.info("使用 HLS 流式生成视频, streamId: {}", currentHlsSessionId);
 
                     // 生成后端 URL（用于 Python 服务回调）
                     String backendUrl = "http://localhost:8080";
 
-                    // 先推送 HLS 流地址到前端
-                    String hlsUrl = backendUrl + "/api/hls/" + streamId + "/playlist.m3u8";
-                    log.info("HLS 流地址: {}", hlsUrl);
+                    // 推送 HLS 流地址到前端（仅第一次推送）
+                    if (currentHlsSequenceNumber == 0) {
+                        String hlsUrl = backendUrl + "/api/hls/" + currentHlsSessionId + "/playlist.m3u8";
+                        log.info("HLS 流地址: {}", hlsUrl);
 
-                    Map<String, Object> hlsMsg = new HashMap<>();
-                    hlsMsg.put("type", "hls_stream");
-                    hlsMsg.put("hls_url", hlsUrl);
-                    hlsMsg.put("stream_id", streamId);
-                    webSocketHandler.broadcastMessage(hlsMsg);
+                        Map<String, Object> hlsMsg = new HashMap<>();
+                        hlsMsg.put("type", "hls_stream");
+                        hlsMsg.put("hls_url", hlsUrl);
+                        hlsMsg.put("stream_id", currentHlsSessionId);
+                        webSocketHandler.broadcastMessage(hlsMsg);
+                    }
+
+                    // 获取下一个序列号
+                    int nextSequence = hlsStreamService.getNextSequenceNumber(currentHlsSessionId);
+                    log.info("下一个序列号: {}", nextSequence);
 
                     // 然后调用 Python 服务生成视频（异步）
                     Map<String, Object> result = pythonServiceClient.generateVideoHls(
                         audioFile, currentCondImage, currentCkptDir, currentWav2vecDir,
-                        currentModelType, currentSeed, currentUseFaceCrop, streamId, backendUrl
+                        currentModelType, currentSeed, currentUseFaceCrop, currentHlsSessionId, backendUrl, nextSequence
                     );
 
                     log.info("Python HLS 生成启动结果: {}", result);
 
                 } else {
                     // 使用原有分段 MP4 方式
+                    String streamId = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
                     pythonServiceClient.setCallbackUrl("http://localhost:8080/api/callback/new-segment");
                     pythonServiceClient.generateVideoStreamingWithCallback(
                         audioFile, currentCondImage, currentCkptDir, currentWav2vecDir,
@@ -449,32 +426,35 @@ public class ChatService {
         // 启动一个新的线程来生成空闲视频
         Thread idleThread = new Thread(() -> {
             try {
-                String streamId = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
-                log.info("开始生成空闲视频, streamId: {}", streamId);
+                log.info("开始生成空闲视频, streamId: {}", currentHlsSessionId);
 
                 if (useHls) {
                     // 使用 HLS 方式生成空闲视频
                     String backendUrl = "http://localhost:8080";
 
-                    // 预创建 HLS 会话
-                    hlsStreamService.createSession(streamId);
+                    // 推送 HLS 地址到前端（仅第一次推送）
+                    if (currentHlsSequenceNumber == 0) {
+                        String hlsUrl = backendUrl + "/api/hls/" + currentHlsSessionId + "/playlist.m3u8";
+                        Map<String, Object> hlsMsg = new HashMap<>();
+                        hlsMsg.put("type", "hls_stream");
+                        hlsMsg.put("hls_url", hlsUrl);
+                        hlsMsg.put("stream_id", currentHlsSessionId);
+                        webSocketHandler.broadcastMessage(hlsMsg);
+                    }
 
-                    // 推送 HLS 地址到前端
-                    String hlsUrl = backendUrl + "/api/hls/" + streamId + "/playlist.m3u8";
-                    Map<String, Object> hlsMsg = new HashMap<>();
-                    hlsMsg.put("type", "hls_stream");
-                    hlsMsg.put("hls_url", hlsUrl);
-                    hlsMsg.put("stream_id", streamId);
-                    webSocketHandler.broadcastMessage(hlsMsg);
+                    // 获取下一个序列号
+                    int nextSequence = hlsStreamService.getNextSequenceNumber(currentHlsSessionId);
+                    log.info("下一个序列号: {}", nextSequence);
 
                     // 调用 Python 服务生成空闲视频
                     pythonServiceClient.generateIdleVideoHls(
                         currentCondImage, currentCkptDir, currentWav2vecDir,
                         currentModelType, currentSeed, currentUseFaceCrop,
-                        duration, streamId, backendUrl
+                        duration, currentHlsSessionId, backendUrl, nextSequence
                     );
                 } else {
                     // 使用原有方式生成空闲视频
+                    String streamId = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
                     pythonServiceClient.setCallbackUrl("http://localhost:8080/api/callback/new-segment");
                     pythonServiceClient.generateIdleVideo(
                         currentCondImage, currentCkptDir, currentWav2vecDir,

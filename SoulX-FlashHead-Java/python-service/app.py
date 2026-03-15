@@ -50,6 +50,122 @@ loaded_model_type = None
 # 全局回调URL，用于通知Java后端新视频段
 callback_url = None
 
+# ==================== 视频生成任务队列 ====================
+class VideoGenerationTask:
+    """视频生成任务"""
+    def __init__(self, task_type, params, future_result=None):
+        self.task_type = task_type  # 'hls_video' 或 'hls_idle'
+        self.params = params
+        self.future_result = future_result  # 用于异步返回结果
+        self.status = 'pending'  # pending, running, completed, failed
+        self.error = None
+
+class TaskQueue:
+    """串行任务队列"""
+    def __init__(self):
+        self.queue = queue.Queue()
+        self.lock = threading.Lock()
+        self.current_task = None
+        self.worker_thread = None
+        self.running = False
+        self._results = {}  # task_id -> result
+        
+    def start(self):
+        """启动队列处理器"""
+        if not self.running:
+            self.running = True
+            self.worker_thread = threading.Thread(target=self._process_queue, daemon=True)
+            self.worker_thread.start()
+            logger.info("视频生成任务队列已启动")
+    
+    def stop(self):
+        """停止队列处理器"""
+        self.running = False
+        if self.worker_thread:
+            self.worker_thread.join(timeout=5)
+    
+    def submit(self, task):
+        """提交任务到队列"""
+        task_id = id(task)
+        self._results[task_id] = {'status': 'pending', 'result': None, 'error': None}
+        self.queue.put(task)
+        logger.info(f"任务已提交到队列: type={task.task_type}, queue_size={self.queue.qsize()}")
+        return task_id
+    
+    def get_result(self, task_id, timeout=None):
+        """获取任务结果（阻塞）"""
+        start_time = time.time()
+        while timeout is None or (time.time() - start_time) < timeout:
+            with self.lock:
+                if task_id in self._results:
+                    result = self._results[task_id]
+                    if result['status'] in ['completed', 'failed']:
+                        return result
+            time.sleep(0.1)
+        return None
+    
+    def _process_queue(self):
+        """队列处理主循环"""
+        while self.running:
+            try:
+                # 获取下一个任务（阻塞等待）
+                task = self.queue.get(timeout=1)
+                
+                with self.lock:
+                    self.current_task = task
+                    task.status = 'running'
+                    task_id = id(task)
+                    self._results[task_id]['status'] = 'running'
+                
+                logger.info(f"开始执行任务: type={task.task_type}")
+                
+                try:
+                    # 执行任务
+                    if task.task_type == 'hls_video':
+                        result = self._execute_hls_video_task(task.params)
+                    elif task.task_type == 'hls_idle':
+                        result = self._execute_hls_idle_task(task.params)
+                    else:
+                        raise ValueError(f"未知任务类型: {task.task_type}")
+                    
+                    with self.lock:
+                        self._results[task_id]['status'] = 'completed'
+                        self._results[task_id]['result'] = result
+                    task.status = 'completed'
+                    logger.info(f"任务执行完成: type={task.task_type}")
+                    
+                except Exception as e:
+                    logger.error(f"任务执行失败: type={task.task_type}, error={e}")
+                    with self.lock:
+                        self._results[task_id]['status'] = 'failed'
+                        self._results[task_id]['error'] = str(e)
+                    task.status = 'failed'
+                    task.error = str(e)
+                
+                with self.lock:
+                    self.current_task = None
+                
+                self.queue.task_done()
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"队列处理异常: {e}")
+    
+    def _execute_hls_video_task(self, params):
+        """执行 HLS 视频生成任务"""
+        return _generate_hls_video_internal(**params)
+    
+    def _execute_hls_idle_task(self, params):
+        """执行 HLS 空闲视频生成任务"""
+        return _generate_hls_idle_internal(**params)
+
+# 全局任务队列实例
+task_queue = TaskQueue()
+
+# 启动队列
+task_queue.start()
+
 
 def _write_frames_to_mp4(frames_list, video_path, fps):
     """将视频帧列表写入MP4文件"""
@@ -74,6 +190,244 @@ def _write_frames_to_mp4(frames_list, video_path, fps):
             for i in range(frames_np.shape[0]):
                 writer.append_data(frames_np[i, :, :, :])
     return video_path
+
+
+def _generate_hls_video_internal(audio_path, cond_image, ckpt_dir, wav2vec_dir, model_type, 
+                                  seed, use_face_crop, stream_id, backend_url, start_sequence):
+    """内部函数：生成 HLS 视频（在队列中串行执行）"""
+    import numpy as np
+    import torch
+    import librosa
+    from collections import deque
+    from hls_generator import HlsGenerator
+    
+    logger.info(f"[队列任务] 开始生成 HLS 视频: stream_id={stream_id}")
+    
+    global pipeline, loaded_ckpt_dir, loaded_wav2vec_dir, loaded_model_type
+    
+    # 加载模型（如果需要）
+    if (
+        pipeline is None
+        or loaded_ckpt_dir != ckpt_dir
+        or loaded_wav2vec_dir != wav2vec_dir
+        or loaded_model_type != model_type
+    ):
+        logger.info(f"[队列任务] 加载模型: ckpt_dir={ckpt_dir}")
+        pipeline = get_pipeline(
+            world_size=1,
+            ckpt_dir=ckpt_dir,
+            model_type=model_type,
+            wav2vec_dir=wav2vec_dir,
+        )
+        loaded_ckpt_dir = ckpt_dir
+        loaded_wav2vec_dir = wav2vec_dir
+        loaded_model_type = model_type
+    
+    base_seed = int(seed) if seed >= 0 else 9999
+    get_base_data(
+        pipeline,
+        cond_image_path_or_dir=cond_image,
+        base_seed=base_seed,
+        use_face_crop=use_face_crop,
+    )
+    
+    infer_params = get_infer_params()
+    sample_rate = infer_params["sample_rate"]
+    tgt_fps = infer_params["tgt_fps"]
+    cached_audio_duration = infer_params["cached_audio_duration"]
+    frame_num = infer_params["frame_num"]
+    motion_frames_num = infer_params["motion_frames_num"]
+    slice_len = frame_num - motion_frames_num
+    
+    human_speech_array_all, _ = librosa.load(audio_path, sr=sample_rate, mono=True)
+    human_speech_array_slice_len = slice_len * sample_rate // tgt_fps
+    
+    remainder = len(human_speech_array_all) % human_speech_array_slice_len
+    if remainder > 0:
+        pad_length = human_speech_array_slice_len - remainder
+        human_speech_array_all = np.concatenate(
+            [human_speech_array_all, np.zeros(pad_length, dtype=human_speech_array_all.dtype)]
+        )
+    human_speech_array_slices = human_speech_array_all.reshape(-1, human_speech_array_slice_len)
+    total_chunks = len(human_speech_array_slices)
+    
+    if total_chunks == 0:
+        raise ValueError("音频太短")
+    
+    # 创建 HLS 生成器
+    hls_gen = HlsGenerator(backend_url=backend_url, video_resolution=(512, 512), fps=tgt_fps)
+    
+    # 启动 HLS 生成
+    video_input = hls_gen.start(session_id=stream_id, audio_path=audio_path, start_sequence=start_sequence)
+    
+    try:
+        logger.info(f"[队列任务] 开始生成视频帧: total_chunks={total_chunks}")
+        
+        audio_dq = deque([0.0] * (sample_rate * cached_audio_duration), 
+                        maxlen=sample_rate * cached_audio_duration)
+        cached_audio_length_sum = sample_rate * cached_audio_duration
+        audio_end_idx = cached_audio_duration * tgt_fps
+        audio_start_idx = audio_end_idx - frame_num
+        
+        total_frames = 0
+        
+        for chunk_idx, human_speech_array in enumerate(human_speech_array_slices):
+            logger.info(f"[队列任务] 处理 chunk {chunk_idx + 1}/{total_chunks}")
+            
+            audio_dq.extend(human_speech_array.tolist())
+            audio_array = np.array(audio_dq)
+            audio_embedding = get_audio_embedding(pipeline, audio_array, audio_start_idx, audio_end_idx)
+            torch.cuda.synchronize()
+            start_time = time.time()
+            video = run_pipeline(pipeline, audio_embedding)
+            video = video[motion_frames_num:]
+            torch.cuda.synchronize()
+            
+            chunk_frame_count = video.shape[0]
+            logger.info(f"[队列任务] HLS chunk-{chunk_idx} 推理完成, 耗时: {time.time() - start_time:.2f}s, frames={chunk_frame_count}")
+            
+            # 将帧数据写入 HLS 生成器
+            chunk_frames_np = video.cpu().numpy()
+            for i in range(chunk_frames_np.shape[0]):
+                frame = chunk_frames_np[i]
+                hls_gen.write_video_frame(frame)
+                total_frames += 1
+        
+        logger.info(f"[队列任务] 所有视频帧生成完成，总共 {total_frames} 帧")
+        
+        # 关闭视频输入
+        if video_input:
+            video_input.close()
+        
+        # 等待片段上传完成
+        logger.info("[队列任务] 等待 5 秒让片段上传完成...")
+        time.sleep(5)
+        
+    finally:
+        hls_gen.stop()
+    
+    hls_url = f"{backend_url}/api/hls/{stream_id}/playlist.m3u8"
+    logger.info(f"[队列任务] HLS 视频生成完成: {hls_url}")
+    
+    return {"stream_id": stream_id, "hls_url": hls_url}
+
+
+def _generate_hls_idle_internal(duration, cond_image, ckpt_dir, wav2vec_dir, model_type,
+                                 seed, use_face_crop, stream_id, backend_url, start_sequence):
+    """内部函数：生成 HLS 空闲视频（在队列中串行执行）"""
+    import numpy as np
+    import torch
+    import tempfile
+    import shutil
+    from collections import deque
+    from hls_generator import HlsGenerator
+    
+    logger.info(f"[队列任务] 开始生成 HLS 空闲视频: stream_id={stream_id}, duration={duration}")
+    
+    global pipeline, loaded_ckpt_dir, loaded_wav2vec_dir, loaded_model_type
+    
+    # 加载模型（如果需要）
+    if (
+        pipeline is None
+        or loaded_ckpt_dir != ckpt_dir
+        or loaded_wav2vec_dir != wav2vec_dir
+        or loaded_model_type != model_type
+    ):
+        logger.info(f"[队列任务] 加载模型: ckpt_dir={ckpt_dir}")
+        pipeline = get_pipeline(
+            world_size=1,
+            ckpt_dir=ckpt_dir,
+            model_type=model_type,
+            wav2vec_dir=wav2vec_dir,
+        )
+        loaded_ckpt_dir = ckpt_dir
+        loaded_wav2vec_dir = wav2vec_dir
+        loaded_model_type = model_type
+    
+    base_seed = int(seed) if seed >= 0 else 9999
+    get_base_data(
+        pipeline,
+        cond_image_path_or_dir=cond_image,
+        base_seed=base_seed,
+        use_face_crop=use_face_crop,
+    )
+    
+    infer_params = get_infer_params()
+    sample_rate = infer_params["sample_rate"]
+    tgt_fps = infer_params["tgt_fps"]
+    cached_audio_duration = infer_params["cached_audio_duration"]
+    frame_num = infer_params["frame_num"]
+    motion_frames_num = infer_params["motion_frames_num"]
+    slice_len = frame_num - motion_frames_num
+    
+    # 创建静音音频
+    silent_audio = create_silent_audio(duration=duration, sample_rate=sample_rate)
+    human_speech_array_slice_len = slice_len * sample_rate // tgt_fps
+    remainder = len(silent_audio) % human_speech_array_slice_len
+    if remainder > 0:
+        pad_length = human_speech_array_slice_len - remainder
+        silent_audio = np.concatenate(
+            [silent_audio, np.zeros(pad_length, dtype=silent_audio.dtype)]
+        )
+    human_speech_array_slices = silent_audio.reshape(-1, human_speech_array_slice_len)
+    
+    if len(human_speech_array_slices) == 0:
+        raise ValueError("音频太短")
+    
+    # 创建临时音频文件
+    temp_dir = tempfile.mkdtemp()
+    audio_path = os.path.join(temp_dir, "silent.wav")
+    _save_chunk_audio_to_wav(silent_audio, audio_path, sample_rate)
+    
+    # 创建 HLS 生成器
+    hls_gen = HlsGenerator(backend_url=backend_url, video_resolution=(512, 512), fps=tgt_fps)
+    
+    # 启动 HLS 生成
+    video_input = hls_gen.start(session_id=stream_id, audio_path=audio_path, start_sequence=start_sequence)
+    
+    try:
+        cached_audio_length_sum = sample_rate * cached_audio_duration
+        audio_end_idx = cached_audio_duration * tgt_fps
+        audio_start_idx = audio_end_idx - frame_num
+        
+        audio_dq = deque([0.0] * cached_audio_length_sum, maxlen=cached_audio_length_sum)
+        
+        for chunk_idx, human_speech_array in enumerate(human_speech_array_slices):
+            audio_dq.extend(human_speech_array.tolist())
+            audio_array = np.array(audio_dq)
+            audio_embedding = get_audio_embedding(pipeline, audio_array, audio_start_idx, audio_end_idx)
+            torch.cuda.synchronize()
+            start_time = time.time()
+            video = run_pipeline(pipeline, audio_embedding)
+            video = video[motion_frames_num:]
+            torch.cuda.synchronize()
+            logger.info(f"[队列任务] HLS 空闲视频 chunk-{chunk_idx} 推理完成, 耗时: {time.time() - start_time:.2f}s")
+            
+            # 将帧数据写入 HLS 生成器
+            chunk_frames_np = video.cpu().numpy()
+            for i in range(chunk_frames_np.shape[0]):
+                frame = chunk_frames_np[i]
+                hls_gen.write_video_frame(frame)
+        
+        # 关闭视频输入
+        if video_input:
+            video_input.close()
+        
+        logger.info("[队列任务] 等待 5 秒让片段上传完成...")
+        time.sleep(5)
+        
+    finally:
+        hls_gen.stop()
+        # 清理临时文件
+        try:
+            shutil.rmtree(temp_dir)
+        except:
+            pass
+    
+    hls_url = f"{backend_url}/api/hls/{stream_id}/playlist.m3u8"
+    logger.info(f"[队列任务] HLS 空闲视频生成完成: {hls_url}")
+    
+    return {"stream_id": stream_id, "hls_url": hls_url}
 
 
 def save_video_with_audio(frames_list, video_path, audio_path, fps):
@@ -692,8 +1046,9 @@ def generate_idle_video():
 @app.route('/generate-video-hls', methods=['POST'])
 def generate_video_hls():
     """
-    HLS 流式生成视频
+    HLS 流式生成视频（队列模式）
     使用 FFmpeg 实时转封装为 HLS 格式，通过 HTTP 推送 TS 片段到后端
+    所有视频生成任务会进入队列，串行执行，避免并发冲突
     
     请求参数：
     - audio_path: 音频文件路径
@@ -707,18 +1062,12 @@ def generate_video_hls():
     - backend_url: 后端服务地址，默认 http://localhost:8080
     
     返回：
-    - 包含 HLS 播放地址的 JSON 响应
+    - 包含 HLS 播放地址的 JSON 响应（立即返回，任务在后台队列中执行）
     """
     if not FLASHHEAD_AVAILABLE:
         return jsonify({"error": "FlashHead 模块不可用"}), 500
     
     try:
-        import numpy as np
-        import torch
-        import librosa
-        
-        from hls_generator import HlsGenerator
-        
         logger.info(f"收到 generate-video-hls 请求")
         data = request.json
         
@@ -731,139 +1080,41 @@ def generate_video_hls():
         use_face_crop = data.get('use_face_crop', False)
         stream_id = data.get('stream_id', datetime.now().strftime("%Y%m%d-%H%M%S"))
         backend_url = data.get('backend_url', 'http://localhost:8080')
+        start_sequence = data.get('start_sequence', 0)
         
         logger.info(f"audio_path: {audio_path}, exists: {os.path.exists(audio_path) if audio_path else 'None'}")
         
         if not audio_path or not os.path.exists(audio_path):
             return jsonify({"error": "音频文件不存在", "audio_path": audio_path}), 400
         
-        global pipeline, loaded_ckpt_dir, loaded_wav2vec_dir, loaded_model_type
+        # 准备任务参数
+        task_params = {
+            'audio_path': audio_path,
+            'cond_image': cond_image,
+            'ckpt_dir': ckpt_dir,
+            'wav2vec_dir': wav2vec_dir,
+            'model_type': model_type,
+            'seed': seed,
+            'use_face_crop': use_face_crop,
+            'stream_id': stream_id,
+            'backend_url': backend_url,
+            'start_sequence': start_sequence
+        }
         
-        if (
-            pipeline is None
-            or loaded_ckpt_dir != ckpt_dir
-            or loaded_wav2vec_dir != wav2vec_dir
-            or loaded_model_type != model_type
-        ):
-            logger.info(f"加载模型: ckpt_dir={ckpt_dir}, wav2vec_dir={wav2vec_dir}")
-            pipeline = get_pipeline(
-                world_size=1,
-                ckpt_dir=ckpt_dir,
-                model_type=model_type,
-                wav2vec_dir=wav2vec_dir,
-            )
-            loaded_ckpt_dir = ckpt_dir
-            loaded_wav2vec_dir = wav2vec_dir
-            loaded_model_type = model_type
+        # 创建任务并提交到队列
+        task = VideoGenerationTask(task_type='hls_video', params=task_params)
+        task_id = task_queue.submit(task)
         
-        base_seed = int(seed) if seed >= 0 else 9999
-        get_base_data(
-            pipeline,
-            cond_image_path_or_dir=cond_image,
-            base_seed=base_seed,
-            use_face_crop=use_face_crop,
-        )
-        
-        infer_params = get_infer_params()
-        sample_rate = infer_params["sample_rate"]
-        tgt_fps = infer_params["tgt_fps"]
-        cached_audio_duration = infer_params["cached_audio_duration"]
-        frame_num = infer_params["frame_num"]
-        motion_frames_num = infer_params["motion_frames_num"]
-        slice_len = frame_num - motion_frames_num
-        
-        human_speech_array_all, _ = librosa.load(audio_path, sr=sample_rate, mono=True)
-        human_speech_array_slice_len = slice_len * sample_rate // tgt_fps
-        
-        remainder = len(human_speech_array_all) % human_speech_array_slice_len
-        if remainder > 0:
-            pad_length = human_speech_array_slice_len - remainder
-            human_speech_array_all = np.concatenate(
-                [human_speech_array_all, np.zeros(pad_length, dtype=human_speech_array_all.dtype)]
-            )
-        human_speech_array_slices = human_speech_array_all.reshape(-1, human_speech_array_slice_len)
-        total_chunks = len(human_speech_array_slices)
-        
-        if total_chunks == 0:
-            return jsonify({"error": "音频太短"}), 400
-        
-        # 创建 HLS 生成器
-        hls_gen = HlsGenerator(backend_url=backend_url, video_resolution=(512, 512), fps=tgt_fps)
-        
-        # 启动 HLS 生成
-        video_input = hls_gen.start(session_id=stream_id, audio_path=audio_path)
-        
-        # 在后台线程中生成视频帧
-        def generate_frames():
-            try:
-                logger.info(f"开始生成视频帧: total_chunks={len(human_speech_array_slices)}")
-                
-                audio_dq = deque([0.0] * (sample_rate * cached_audio_duration), 
-                                maxlen=sample_rate * cached_audio_duration)
-                cached_audio_length_sum = sample_rate * cached_audio_duration
-                audio_end_idx = cached_audio_duration * tgt_fps
-                audio_start_idx = audio_end_idx - frame_num
-                
-                total_frames = 0
-                
-                for chunk_idx, human_speech_array in enumerate(human_speech_array_slices):
-                    logger.info(f"处理 chunk {chunk_idx + 1}/{len(human_speech_array_slices)}")
-                    
-                    audio_dq.extend(human_speech_array.tolist())
-                    audio_array = np.array(audio_dq)
-                    audio_embedding = get_audio_embedding(pipeline, audio_array, audio_start_idx, audio_end_idx)
-                    torch.cuda.synchronize()
-                    start_time = time.time()
-                    video = run_pipeline(pipeline, audio_embedding)
-                    video = video[motion_frames_num:]
-                    torch.cuda.synchronize()
-                    
-                    chunk_frame_count = video.shape[0]
-                    logger.info(f"HLS chunk-{chunk_idx} 推理完成, 耗时: {time.time() - start_time:.2f}s, frames={chunk_frame_count}")
-                    
-                    # 将帧数据写入 HLS 生成器
-                    chunk_frames_np = video.cpu().numpy()
-                    # 写入每一帧
-                    for i in range(chunk_frames_np.shape[0]):
-                        frame = chunk_frames_np[i]
-                        hls_gen.write_video_frame(frame)
-                        total_frames += 1
-                    
-                    logger.info(f"已写入 {total_frames} 帧到 HLS 生成器")
-                
-                logger.info(f"所有视频帧生成完成，总共 {total_frames} 帧")
-                
-                # 关闭视频输入，通知 FFmpeg 结束
-                if video_input:
-                    logger.info("关闭视频输入管道")
-                    video_input.close()
-                
-                logger.info("视频帧生成完成")
-                
-            except Exception as e:
-                logger.error(f"生成视频帧失败: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-            finally:
-                # 等待一段时间后停止 HLS 生成器
-                logger.info("等待 5 秒后停止 HLS 生成器...")
-                time.sleep(5)
-                logger.info("停止 HLS 生成器")
-                hls_gen.stop()
-        
-        # 启动生成线程
-        gen_thread = threading.Thread(target=generate_frames)
-        gen_thread.daemon = True
-        gen_thread.start()
-        
-        # 返回 HLS 播放地址
+        # 立即返回 HLS 播放地址（任务在后台队列中异步执行）
         hls_url = f"{backend_url}/api/hls/{stream_id}/playlist.m3u8"
         
         return jsonify({
             "status": "success",
             "stream_id": stream_id,
             "hls_url": hls_url,
-            "message": "HLS 流已启动，请使用 hls.js 播放上述地址"
+            "message": "HLS 视频生成任务已加入队列",
+            "task_id": task_id,
+            "queue_size": task_queue.queue.qsize()
         })
         
     except Exception as e:
@@ -876,7 +1127,8 @@ def generate_video_hls():
 @app.route('/generate-idle-video-hls', methods=['POST'])
 def generate_idle_video_hls():
     """
-    HLS 流式生成空闲视频
+    HLS 流式生成空闲视频（队列模式）
+    所有视频生成任务会进入队列，串行执行，避免并发冲突
     
     请求参数：
     - duration: 视频总时长（秒），默认3.0
@@ -888,17 +1140,17 @@ def generate_idle_video_hls():
     - use_face_crop: 是否使用人脸裁剪
     - stream_id: 流ID，用于标识此次生成
     - backend_url: 后端服务地址，默认 http://localhost:8080
+    
+    返回：
+    - 包含 HLS 播放地址的 JSON 响应（立即返回，任务在后台队列中执行）
     """
     if not FLASHHEAD_AVAILABLE:
         return jsonify({"error": "FlashHead 模块不可用"}), 500
     
     try:
-        import numpy as np
-        import torch
-        
-        from hls_generator import HlsGenerator
-        
+        logger.info(f"收到 generate-idle-video-hls 请求")
         data = request.json
+        
         duration = data.get('duration', 3.0)
         cond_image = data.get('cond_image', 'examples/girl.png')
         ckpt_dir = data.get('ckpt_dir', 'models/SoulX-FlashHead-1_3B')
@@ -908,123 +1160,36 @@ def generate_idle_video_hls():
         use_face_crop = data.get('use_face_crop', False)
         stream_id = data.get('stream_id', datetime.now().strftime("%Y%m%d-%H%M%S"))
         backend_url = data.get('backend_url', 'http://localhost:8080')
+        start_sequence = data.get('start_sequence', 0)
         
-        global pipeline, loaded_ckpt_dir, loaded_wav2vec_dir, loaded_model_type
+        # 准备任务参数
+        task_params = {
+            'duration': duration,
+            'cond_image': cond_image,
+            'ckpt_dir': ckpt_dir,
+            'wav2vec_dir': wav2vec_dir,
+            'model_type': model_type,
+            'seed': seed,
+            'use_face_crop': use_face_crop,
+            'stream_id': stream_id,
+            'backend_url': backend_url,
+            'start_sequence': start_sequence
+        }
         
-        if (
-            pipeline is None
-            or loaded_ckpt_dir != ckpt_dir
-            or loaded_wav2vec_dir != wav2vec_dir
-            or loaded_model_type != model_type
-        ):
-            logger.info(f"加载模型: ckpt_dir={ckpt_dir}, wav2vec_dir={wav2vec_dir}")
-            pipeline = get_pipeline(
-                world_size=1,
-                ckpt_dir=ckpt_dir,
-                model_type=model_type,
-                wav2vec_dir=wav2vec_dir,
-            )
-            loaded_ckpt_dir = ckpt_dir
-            loaded_wav2vec_dir = wav2vec_dir
-            loaded_model_type = model_type
+        # 创建任务并提交到队列
+        task = VideoGenerationTask(task_type='hls_idle', params=task_params)
+        task_id = task_queue.submit(task)
         
-        base_seed = int(seed) if seed >= 0 else 9999
-        get_base_data(
-            pipeline,
-            cond_image_path_or_dir=cond_image,
-            base_seed=base_seed,
-            use_face_crop=use_face_crop,
-        )
-        
-        infer_params = get_infer_params()
-        sample_rate = infer_params["sample_rate"]
-        tgt_fps = infer_params["tgt_fps"]
-        cached_audio_duration = infer_params["cached_audio_duration"]
-        frame_num = infer_params["frame_num"]
-        motion_frames_num = infer_params["motion_frames_num"]
-        slice_len = frame_num - motion_frames_num
-        
-        # 创建静音音频
-        silent_audio = create_silent_audio(duration=duration, sample_rate=sample_rate)
-        human_speech_array_slice_len = slice_len * sample_rate // tgt_fps
-        remainder = len(silent_audio) % human_speech_array_slice_len
-        if remainder > 0:
-            pad_length = human_speech_array_slice_len - remainder
-            silent_audio = np.concatenate(
-                [silent_audio, np.zeros(pad_length, dtype=silent_audio.dtype)]
-            )
-        human_speech_array_slices = silent_audio.reshape(-1, human_speech_array_slice_len)
-        
-        if len(human_speech_array_slices) == 0:
-            return jsonify({"error": "音频太短"}), 400
-        
-        # 创建临时音频文件
-        temp_dir = tempfile.mkdtemp()
-        audio_path = os.path.join(temp_dir, "silent.wav")
-        _save_chunk_audio_to_wav(silent_audio, audio_path, sample_rate)
-        
-        # 创建 HLS 生成器
-        hls_gen = HlsGenerator(backend_url=backend_url, video_resolution=(512, 512), fps=tgt_fps)
-        
-        # 启动 HLS 生成
-        video_input = hls_gen.start(session_id=stream_id, audio_path=audio_path)
-        
-        # 在后台线程中生成视频帧
-        def generate_frames():
-            try:
-                cached_audio_length_sum = sample_rate * cached_audio_duration
-                audio_end_idx = cached_audio_duration * tgt_fps
-                audio_start_idx = audio_end_idx - frame_num
-                
-                audio_dq = deque([0.0] * cached_audio_length_sum, maxlen=cached_audio_length_sum)
-                
-                for chunk_idx, human_speech_array in enumerate(human_speech_array_slices):
-                    audio_dq.extend(human_speech_array.tolist())
-                    audio_array = np.array(audio_dq)
-                    audio_embedding = get_audio_embedding(pipeline, audio_array, audio_start_idx, audio_end_idx)
-                    torch.cuda.synchronize()
-                    start_time = time.time()
-                    video = run_pipeline(pipeline, audio_embedding)
-                    video = video[motion_frames_num:]
-                    torch.cuda.synchronize()
-                    logger.info(f"HLS 空闲视频 chunk-{chunk_idx} 推理完成, 耗时: {time.time() - start_time:.2f}s")
-                    
-                    # 将帧数据写入 HLS 生成器
-                    chunk_frames_np = video.cpu().numpy()
-                    for i in range(chunk_frames_np.shape[0]):
-                        frame = chunk_frames_np[i]
-                        hls_gen.write_video_frame(frame)
-                
-                # 关闭视频输入
-                if video_input:
-                    video_input.close()
-                
-                logger.info("空闲视频帧生成完成")
-                
-            except Exception as e:
-                logger.error(f"生成空闲视频帧失败: {e}")
-            finally:
-                time.sleep(5)
-                hls_gen.stop()
-                # 清理临时文件
-                try:
-                    shutil.rmtree(temp_dir)
-                except:
-                    pass
-        
-        # 启动生成线程
-        gen_thread = threading.Thread(target=generate_frames)
-        gen_thread.daemon = True
-        gen_thread.start()
-        
-        # 返回 HLS 播放地址
+        # 立即返回 HLS 播放地址（任务在后台队列中异步执行）
         hls_url = f"{backend_url}/api/hls/{stream_id}/playlist.m3u8"
         
         return jsonify({
             "status": "success",
             "stream_id": stream_id,
             "hls_url": hls_url,
-            "message": "HLS 空闲视频流已启动"
+            "message": "HLS 空闲视频生成任务已加入队列",
+            "task_id": task_id,
+            "queue_size": task_queue.queue.qsize()
         })
         
     except Exception as e:

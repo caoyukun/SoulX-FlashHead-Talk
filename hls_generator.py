@@ -15,6 +15,10 @@ import shutil
 from datetime import datetime
 from loguru import logger
 
+# 全局已上传片段跟踪（按 session_id 分组）
+_global_uploaded_segments = {}
+_global_lock = threading.Lock()
+
 
 class HlsGenerator:
     """
@@ -34,17 +38,18 @@ class HlsGenerator:
         self.segment_thread = None
         self.sequence_number = 0
 
-    def start(self, session_id, audio_path=None):
+    def start(self, session_id, audio_path=None, start_sequence=0):
         """
         启动 HLS 生成
 
         Args:
             session_id: HLS 会话 ID
             audio_path: 音频文件路径（可选）
+            start_sequence: 起始序列号
         """
         self.session_id = session_id
         self.is_running = True
-        self.sequence_number = 0
+        self.sequence_number = start_sequence
 
         # 创建临时目录存放音频文件
         self.audio_temp_dir = tempfile.mkdtemp()
@@ -249,12 +254,12 @@ class HlsGenerator:
         if self.segment_thread:
             self.segment_thread.join(timeout=5)
 
-        # 通知后端流结束
-        try:
-            end_url = f"{self.backend_url}/api/hls/{self.session_id}/end"
-            requests.post(end_url, timeout=5)
-        except Exception as e:
-            logger.warning(f"通知后端流结束失败: {e}")
+        # 不通知后端流结束（保持会话持续）
+        # try:
+        #     end_url = f"{self.backend_url}/api/hls/{self.session_id}/end"
+        #     requests.post(end_url, timeout=5)
+        # except Exception as e:
+        #     logger.warning(f"通知后端流结束失败: {e}")
 
         # 清理临时目录
         if self.audio_temp_dir and os.path.exists(self.audio_temp_dir):
@@ -282,16 +287,18 @@ class HlsGeneratorDirectUpload:
         self.upload_thread = None
         self.segment_parser = None
 
-    def start(self, session_id, audio_path=None):
+    def start(self, session_id, audio_path=None, start_sequence=0):
         """
         启动 HLS 生成
 
         Args:
             session_id: HLS 会话 ID
             audio_path: 音频文件路径（可选）
+            start_sequence: 起始序列号
         """
         self.session_id = session_id
         self.is_running = True
+        self.start_sequence = start_sequence
 
         # 创建临时目录
         temp_dir = tempfile.mkdtemp()
@@ -438,8 +445,16 @@ class HlsGeneratorDirectUpload:
 
     def _upload_worker(self, hls_dir):
         """上传工作线程"""
-        uploaded = set()
+        global _global_uploaded_segments, _global_lock
+        
+        # 获取当前 session 的全局已上传集合
+        with _global_lock:
+            if self.session_id not in _global_uploaded_segments:
+                _global_uploaded_segments[self.session_id] = set()
+            global_uploaded = _global_uploaded_segments[self.session_id]
+        
         last_m3u8_content = ""
+        last_log_time = 0
         
         logger.info(f"上传工作线程启动: session_id={self.session_id}, hls_dir={hls_dir}")
 
@@ -455,11 +470,20 @@ class HlsGeneratorDirectUpload:
                 files = os.listdir(hls_dir)
                 ts_files = [f for f in files if f.endswith(".ts")]
                 
-                if ts_files:
-                    logger.debug(f"发现 {len(ts_files)} 个 TS 文件，已上传 {len(uploaded)} 个")
+                # 减少日志频率（每5秒打印一次）
+                current_time = time.time()
+                if ts_files and current_time - last_log_time > 5:
+                    with _global_lock:
+                        uploaded_count = len(global_uploaded)
+                    logger.debug(f"发现 {len(ts_files)} 个 TS 文件，已上传 {uploaded_count} 个")
+                    last_log_time = current_time
                 
                 for fname in ts_files:
-                    if fname not in uploaded:
+                    # 检查全局已上传集合
+                    with _global_lock:
+                        already_uploaded = fname in global_uploaded
+                    
+                    if not already_uploaded:
                         fpath = os.path.join(hls_dir, fname)
 
                         # 等待文件稳定
@@ -475,11 +499,10 @@ class HlsGeneratorDirectUpload:
                             with open(fpath, "rb") as f:
                                 data = f.read()
 
-                            seq = int(fname.replace("segment_", "").replace(".ts", ""))
+                            seq = int(fname.replace("segment_", "").replace(".ts", "")) + self.start_sequence
                             duration = 2.0
 
                             url = f"{self.backend_url}/api/hls/{self.session_id}/segment"
-                            logger.debug(f"上传片段: {fname}, seq={seq}, size={len(data)} bytes")
                             
                             resp = requests.post(
                                 url,
@@ -490,7 +513,8 @@ class HlsGeneratorDirectUpload:
                             )
 
                             if resp.status_code == 200:
-                                uploaded.add(fname)
+                                with _global_lock:
+                                    global_uploaded.add(fname)
                                 logger.info(f"上传片段成功: {fname}, seq={seq}")
                             else:
                                 logger.warning(f"上传片段失败: {fname}, status={resp.status_code}, response={resp.text}")
@@ -520,6 +544,8 @@ class HlsGeneratorDirectUpload:
 
     def stop(self):
         """停止生成"""
+        global _global_uploaded_segments, _global_lock
+        
         self.is_running = False
 
         if self.ffmpeg_process:
@@ -540,17 +566,11 @@ class HlsGeneratorDirectUpload:
         if self.upload_thread:
             self.upload_thread.join(timeout=5)
 
-        # 通知后端流结束
-        try:
-            end_url = f"{self.backend_url}/api/hls/{self.session_id}/end"
-            logger.info(f"通知后端流结束: {end_url}")
-            resp = requests.post(end_url, timeout=5)
-            if resp.status_code == 200:
-                logger.info(f"后端流结束通知成功: {self.session_id}")
-            else:
-                logger.warning(f"后端流结束通知失败: {resp.status_code}")
-        except Exception as e:
-            logger.error(f"通知后端流结束失败: {e}")
+        # 清理全局已上传集合（可选：如果希望完全重新开始可以启用）
+        # with _global_lock:
+        #     if self.session_id in _global_uploaded_segments:
+        #         del _global_uploaded_segments[self.session_id]
+        #         logger.info(f"清理全局已上传集合: {self.session_id}")
 
         logger.info(f"HLS 生成停止: {self.session_id}")
 

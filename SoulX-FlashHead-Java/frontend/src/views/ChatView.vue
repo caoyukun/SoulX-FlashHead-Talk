@@ -495,7 +495,8 @@ const handleWebSocketMessage = (data) => {
     ElMessage.error(data.message)
     addMessage('system', '错误: ' + data.message)
   } else if (data.type === 'hls_stream') {
-    if (data.hls_url) {
+    if (data.hls_url && !hls) {
+      // 只在第一次收到消息时初始化播放器
       initHlsPlayer(data.hls_url)
     }
   }
@@ -511,18 +512,10 @@ const initHlsPlayer = async (hlsUrl) => {
     return
   }
 
+  console.log('HLS: Initializing player for URL:', hlsUrl)
   currentHlsUrl.value = hlsUrl
 
   if (Hls.isSupported()) {
-    if (hls) {
-      hls.destroy()
-      hls = null
-    }
-
-    hlsVideoPlayer.value.pause()
-    hlsVideoPlayer.value.removeAttribute('src')
-    hlsVideoPlayer.value.load()
-
     hls = new Hls({
       enableWorker: true,
       lowLatencyMode: true,
@@ -544,6 +537,7 @@ const initHlsPlayer = async (hlsUrl) => {
 
     hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
       console.log('HLS: Manifest parsed, levels:', data.levels.length)
+      
       if (hlsVideoPlayer.value) {
         hlsVideoPlayer.value.play().catch(e => {
           console.log('HLS autoplay prevented:', e)
@@ -585,7 +579,6 @@ const initHlsPlayer = async (hlsUrl) => {
       if (data.details && data.details.endList) {
         console.log('HLS: End list detected')
       }
-      // 动态更新总时长
       if (data.details && data.details.fragments) {
         let totalTime = 0
         for (const frag of data.details.fragments) {
@@ -599,8 +592,7 @@ const initHlsPlayer = async (hlsUrl) => {
 
     hls.on(Hls.Events.FRAG_LOADED, (event, data) => {
       console.log('HLS: Fragment loaded, duration:', data.frag.duration)
-      // 片段加载后更新总时长
-      if (hls && hls.levels && hls.levels[0] && hls.levels[0].details && hls.levels[0].details.fragments) {
+      if (hls.levels && hls.levels[0] && hls.levels[0].details && hls.levels[0].details.fragments) {
         let totalTime = 0
         for (const frag of hls.levels[0].details.fragments) {
           totalTime += frag.duration
@@ -705,7 +697,7 @@ const handleHlsError = (e) => {
 
 const handleHlsEnded = () => {
   console.log('HLS: Playback ended')
-  // 播放结束时请求下一个空闲视频，但保持当前播放器，等收到新的 hls_stream 消息时再切换
+  // 播放结束时请求下一个空闲视频，播放器会自动继续播放新片段
   playIdleVideo()
 }
 

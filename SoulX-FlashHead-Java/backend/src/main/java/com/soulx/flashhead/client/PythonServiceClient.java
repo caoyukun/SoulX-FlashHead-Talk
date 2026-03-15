@@ -244,7 +244,7 @@ public class PythonServiceClient {
     public Map<String, Object> generateVideoHls(File audioFile, String condImage,
                                                  String ckptDir, String wav2vecDir,
                                                  String modelType, int seed, boolean useFaceCrop,
-                                                 String streamId, String backendUrl) throws IOException {
+                                                 String streamId, String backendUrl, Integer startSequence) throws IOException {
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("audio_path", audioFile.getAbsolutePath());
         requestBody.put("cond_image", condImage);
@@ -255,6 +255,9 @@ public class PythonServiceClient {
         requestBody.put("use_face_crop", useFaceCrop);
         requestBody.put("stream_id", streamId);
         requestBody.put("backend_url", backendUrl);
+        if (startSequence != null) {
+            requestBody.put("start_sequence", startSequence);
+        }
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
 
@@ -280,7 +283,7 @@ public class PythonServiceClient {
      */
     public Map<String, Object> generateIdleVideoHls(String condImage, String ckptDir, String wav2vecDir,
                                                      String modelType, int seed, boolean useFaceCrop,
-                                                     double duration, String streamId, String backendUrl) throws IOException {
+                                                     double duration, String streamId, String backendUrl, Integer startSequence) throws IOException {
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("duration", duration);
         requestBody.put("cond_image", condImage);
@@ -291,6 +294,9 @@ public class PythonServiceClient {
         requestBody.put("use_face_crop", useFaceCrop);
         requestBody.put("stream_id", streamId);
         requestBody.put("backend_url", backendUrl);
+        if (startSequence != null) {
+            requestBody.put("start_sequence", startSequence);
+        }
 
         String jsonBody = objectMapper.writeValueAsString(requestBody);
 

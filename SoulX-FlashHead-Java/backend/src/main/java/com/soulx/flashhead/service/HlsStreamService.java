@@ -107,7 +107,7 @@ public class HlsStreamService {
             }
 
             // 限制片段数量，避免内存溢出
-            if (session.getSegments().size() > MAX_SEGMENTS) {
+            while (session.getSegments().size() > MAX_SEGMENTS) {
                 session.getSegments().remove(0);
                 session.setSequenceNumber(session.getSequenceNumber() + 1);
             }
@@ -190,6 +190,32 @@ public class HlsStreamService {
                 session.setLastActivityTime(System.currentTimeMillis());
             }
             log.info("结束 HLS 会话: {}", sessionId);
+        }
+    }
+
+    /**
+     * 获取下一个可用的序列号
+     */
+    public int getNextSequenceNumber(String sessionId) {
+        HlsSession session = getSession(sessionId);
+        if (session == null || session.getSegments().isEmpty()) {
+            return 0;
+        }
+        // 获取最后一个片段的序列号并加 1
+        TsSegment lastSegment = session.getSegments().get(session.getSegments().size() - 1);
+        return lastSegment.getSequenceNumber() + 1;
+    }
+
+    /**
+     * 获取会话中的片段数量
+     */
+    public int getSegmentCount(String sessionId) {
+        HlsSession session = getSession(sessionId);
+        if (session == null) {
+            return 0;
+        }
+        synchronized (session) {
+            return session.getSegments().size();
         }
     }
 
