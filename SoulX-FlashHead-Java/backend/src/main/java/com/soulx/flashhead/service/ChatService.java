@@ -387,6 +387,67 @@ public class ChatService {
         onVideoGenerationComplete(null, null, null, null, null);
     }
     
+    public void processAudioMessage(File audioFile, String sessionId) {
+        if (processingSessions.getOrDefault(sessionId, false)) {
+            log.warn("Session {} is already processing", sessionId);
+            return;
+        }
+
+        processingSessions.put(sessionId, true);
+        hasPendingReply.set(true);
+        hasReceivedFirstReply.set(false);
+        currentAudioFile = audioFile;
+
+        new Thread(() -> {
+            try {
+                log.info("Processing audio message for session: {}", sessionId);
+
+                if (useHls) {
+                    log.info("使用 HLS 流式生成视频, streamId: {}", currentHlsSessionId);
+                    String backendUrl = "http://localhost:8080";
+
+                    if (currentHlsSequenceNumber == 0) {
+                        String hlsUrl = backendUrl + "/api/hls/" + currentHlsSessionId + "/playlist.m3u8";
+                        log.info("HLS 流地址: {}", hlsUrl);
+                        Map<String, Object> hlsMsg = new HashMap<>();
+                        hlsMsg.put("type", "hls_stream");
+                        hlsMsg.put("hls_url", hlsUrl);
+                        hlsMsg.put("stream_id", currentHlsSessionId);
+                        webSocketHandler.broadcastMessage(hlsMsg);
+                    }
+
+                    int nextSequence = hlsStreamService.getNextSequenceNumber(currentHlsSessionId);
+                    log.info("下一个序列号: {}", nextSequence);
+
+                    Map<String, Object> result = pythonServiceClient.generateVideoHls(
+                        audioFile, currentCondImage, currentCkptDir, currentWav2vecDir,
+                        currentModelType, currentSeed, currentUseFaceCrop, currentHlsSessionId, backendUrl, nextSequence
+                    );
+
+                    log.info("Python HLS 生成启动结果: {}", result);
+                } else {
+                    String streamId = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
+                    pythonServiceClient.setCallbackUrl("http://localhost:8080/api/callback/new-segment");
+                    pythonServiceClient.generateVideoStreamingWithCallback(
+                        audioFile, currentCondImage, currentCkptDir, currentWav2vecDir,
+                        currentModelType, currentSeed, currentUseFaceCrop, streamId
+                    );
+                }
+
+            } catch (Exception e) {
+                log.error("Error processing audio message", e);
+                Map<String, Object> errorMsg = new HashMap<>();
+                errorMsg.put("type", "error");
+                errorMsg.put("message", e.getMessage());
+                webSocketHandler.broadcastMessage(errorMsg);
+                cleanupAudioFile();
+                hasPendingReply.set(false);
+                hasReceivedFirstReply.set(false);
+                processingSessions.remove(sessionId);
+            }
+        }).start();
+    }
+    
     public void processChatMessage(String userMessage, String sessionId) {
         if (processingSessions.getOrDefault(sessionId, false)) {
             log.warn("Session {} is already processing", sessionId);

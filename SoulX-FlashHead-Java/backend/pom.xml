@@ -21,6 +21,7 @@
     <properties>
         <java.version>17</java.version>
         <okhttp.version>4.12.0</okhttp.version>
+        <tyrus.version>2.1.5</tyrus.version>
     </properties>
 
     <dependencies>
@@ -55,6 +56,18 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
+        </dependency>
+        
+        <!-- WebSocket Client (Tyrus) -->
+        <dependency>
+            <groupId>org.glassfish.tyrus</groupId>
+            <artifactId>tyrus-client</artifactId>
+            <version>${tyrus.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.glassfish.tyrus</groupId>
+            <artifactId>tyrus-container-jdk-client</artifactId>
+            <version>${tyrus.version}</version>
         </dependency>
 
         <dependency>

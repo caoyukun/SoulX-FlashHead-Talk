@@ -294,6 +294,10 @@ let audioChunks = []
 
 let hasUserInteracted = ref(false)
 let ws = null
+let doubaoWs = null
+let audioContext = null
+let audioProcessor = null
+let sourceNode = null
 
 const chatStore = useChatStore()
 
@@ -350,44 +354,131 @@ const addMessage = (type, text) => {
 }
 
 const startVoiceInput = async () => {
+  await startRealtimeVoiceInput()
+}
+
+const stopVoiceInput = () => {
+  stopRealtimeVoiceInput()
+}
+
+const connectDoubaoWebSocket = () => {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const wsUrl = `${protocol}//${window.location.host}/ws/doubao`
+  
+  doubaoWs = new WebSocket(wsUrl)
+  
+  doubaoWs.onopen = () => {
+    console.log('Doubao WebSocket connected')
+  }
+  
+  doubaoWs.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data)
+      if (data.type === 'connected') {
+        console.log('Doubao session started')
+      } else if (data.type === 'error') {
+        ElMessage.error('豆包语音服务错误: ' + data.message)
+      }
+    } catch (e) {
+      console.error('解析豆包消息失败:', e)
+    }
+  }
+  
+  doubaoWs.onerror = () => {
+    console.error('Doubao WebSocket error')
+  }
+  
+  doubaoWs.onclose = () => {
+    console.log('Doubao WebSocket closed')
+  }
+}
+
+const startRealtimeVoiceInput = async () => {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    mediaRecorder = new MediaRecorder(stream)
-    audioChunks = []
     
-    mediaRecorder.ondataavailable = (event) => {
-      audioChunks.push(event.data)
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 16000
+    })
+    
+    sourceNode = audioContext.createMediaStreamSource(stream)
+    
+    const bufferSize = 4096
+    audioProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1)
+    
+    audioProcessor.onaudioprocess = (e) => {
+      const inputData = e.inputBuffer.getChannelData(0)
+      const pcmData = floatTo16BitPCM(inputData)
+      
+      if (doubaoWs && doubaoWs.readyState === WebSocket.OPEN) {
+        doubaoWs.send(pcmData)
+      }
     }
     
-    mediaRecorder.onstop = async () => {
-      const audioBlob = new Blob(audioChunks, { type: 'audio/wav' })
-      await processVoiceInput(audioBlob)
-    }
+    sourceNode.connect(audioProcessor)
+    audioProcessor.connect(audioContext.destination)
     
-    mediaRecorder.start()
     isRecording.value = true
     recordingTime.value = 0
     recordingTimer = setInterval(() => {
       recordingTime.value++
     }, 1000)
+    
+    if (!doubaoWs || doubaoWs.readyState !== WebSocket.OPEN) {
+      connectDoubaoWebSocket()
+    }
+    
   } catch (error) {
     console.error('无法访问麦克风:', error)
     ElMessage.error('无法访问麦克风，请检查权限设置')
   }
 }
 
-const stopVoiceInput = () => {
-  if (mediaRecorder && isRecording.value) {
-    mediaRecorder.stop()
-    mediaRecorder.stream.getTracks().forEach(track => track.stop())
-    isRecording.value = false
-    clearInterval(recordingTimer)
+const stopRealtimeVoiceInput = () => {
+  if (audioProcessor) {
+    audioProcessor.disconnect()
+    audioProcessor = null
   }
+  if (sourceNode) {
+    sourceNode.disconnect()
+    sourceNode = null
+  }
+  if (audioContext) {
+    audioContext.close()
+    audioContext = null
+  }
+  
+  if (mediaRecorder && isRecording.value) {
+    mediaRecorder.stream.getTracks().forEach(track => track.stop())
+  }
+  
+  isRecording.value = false
+  clearInterval(recordingTimer)
+  
+  if (doubaoWs && doubaoWs.readyState === WebSocket.OPEN) {
+    doubaoWs.send(JSON.stringify({ type: 'end_audio' }))
+  }
+}
+
+const floatTo16BitPCM = (input) => {
+  const output = new Int16Array(input.length)
+  for (let i = 0; i < input.length; i++) {
+    const s = Math.max(-1, Math.min(1, input[i]))
+    output[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
+  }
+  
+  const buffer = new ArrayBuffer(output.length * 2)
+  const view = new DataView(buffer)
+  for (let i = 0; i < output.length; i++) {
+    view.setInt16(i * 2, output[i], true)
+  }
+  
+  return buffer
 }
 
 const processVoiceInput = async (audioBlob) => {
   try {
-    ElMessage.info('语音输入功能需要接入语音识别服务')
+    ElMessage.info('语音输入功能正在使用豆包实时语音服务')
   } catch (error) {
     console.error('语音识别失败:', error)
   }
@@ -741,6 +832,18 @@ onMounted(() => {
 onUnmounted(() => {
   if (ws) {
     ws.close()
+  }
+  if (doubaoWs) {
+    doubaoWs.close()
+  }
+  if (audioProcessor) {
+    audioProcessor.disconnect()
+  }
+  if (sourceNode) {
+    sourceNode.disconnect()
+  }
+  if (audioContext) {
+    audioContext.close()
   }
   destroyHlsPlayer()
 })

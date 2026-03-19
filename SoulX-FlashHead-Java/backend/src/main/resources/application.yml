@@ -11,6 +11,13 @@ flashhead:
   volcengine:
     api-url: https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions
     api-key: 651b4793-5c37-483d-ac79-99d59ea452bf
+  doubao:
+    api-url: wss://openspeech.bytedance.com/api/v1/ai_voice_assistant/chat
+    api-key: ${DOUBAO_API_KEY:}
+    app-id: ${DOUBAO_APP_ID:}
+    model-version: o2.0
+    speaker: zh_female_vv_jupiter_bigtts
+    audio-format: pcm_s16le
   video:
     storage-path: ./chat_results
 
